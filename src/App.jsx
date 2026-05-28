@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import AuthPanel from "./AuthPanel";
+import TilstandsrapportPanel, { applyTilstandsrapportToHome } from "./TilstandsrapportPanel";
 import {
   deleteCloudState,
   getSessionUser,
@@ -16,6 +17,7 @@ import {
   loadSavedState,
   saveSavedState,
 } from "./storage";
+import { applyThemeToDocument, getInitialTheme, THEME_STORAGE_KEY } from "./theme";
 import {
   estimateBoligverdi,
   getKommuneRate,
@@ -203,6 +205,9 @@ const defaultStatusQuo = {
   salgskostnader: 150000,
   dokumentavgiftProsent: 2.5,
   dokumentavgiftAktivert: false,
+  tilstandsTiltak: [],
+  engangsTiltakTilstand: 0,
+  tilstandsrapportUrl: "",
 };
 
 const defaultNyBolig = {
@@ -227,6 +232,9 @@ const defaultNyBolig = {
   utleieEkstraSlitasjeProsent: 8,
   utleieEkstraStromVannAar: 6000,
   utleieEkstraAnnetAar: 2000,
+  tilstandsTiltak: [],
+  engangsTiltakTilstand: 0,
+  tilstandsrapportUrl: "",
 };
 
 function calculateUtleie(nyBolig) {
@@ -286,6 +294,17 @@ function applyListingImport(current, data) {
 function applyListingToStatusQuo(statusQuo, data) {
   const next = applyListingCosts({ ...statusQuo }, data);
   if (data.boligpris != null) next.verdiIDag = data.boligpris;
+  if (data.tilstandsrapport?.found) {
+    return applyTilstandsrapportToHome(next, data.tilstandsrapport);
+  }
+  return next;
+}
+
+function applyListingToNyBolig(nyBolig, data) {
+  const next = applyListingImport(nyBolig, data);
+  if (data.tilstandsrapport?.found) {
+    return applyTilstandsrapportToHome(next, data.tilstandsrapport);
+  }
   return next;
 }
 
@@ -401,7 +420,8 @@ function calculateNyBolig(nyBolig, nettoFraSalg) {
   const utleie = calculateUtleie(nyBolig);
   const monthlyNetCost = monthlyTotal - utleie.nettoInntektMnd;
   const dokumentavgift = calculateDokumentavgift(nyBolig, nyBolig.boligpris);
-  const engangskostnader = nyBolig.flyttekostnader + dokumentavgift;
+  const engangsTiltakTilstand = nyBolig.engangsTiltakTilstand ?? 0;
+  const engangskostnader = nyBolig.flyttekostnader + dokumentavgift + engangsTiltakTilstand;
   const kontanterTilDokOgFlytt = engangskostnader;
   const kontanterFraLomme =
     nyBolig.kontanterEgenkapital + kontanterTilDokOgFlytt;
@@ -421,6 +441,7 @@ function calculateNyBolig(nyBolig, nettoFraSalg) {
     monthlyNetCost,
     yearlyNetCost: monthlyNetCost * MONTHS_PER_YEAR,
     flyttekostnader: nyBolig.flyttekostnader,
+    engangsTiltakTilstand,
     dokumentavgift,
     engangskostnader,
     utleie,
@@ -547,6 +568,18 @@ function exportPdf(results) {
 }
 
 function CostInput({ label, value, onChange, step = 1000 }) {
+  const [draft, setDraft] = useState(() => String(value ?? ""));
+
+  useEffect(() => {
+    setDraft(String(value ?? ""));
+  }, [value]);
+
+  const commitValue = (raw) => {
+    const parsed = readNumber(raw);
+    onChange(parsed);
+    setDraft(String(parsed));
+  };
+
   return (
     <label className="field">
       <span>{label}</span>
@@ -554,8 +587,15 @@ function CostInput({ label, value, onChange, step = 1000 }) {
         type="number"
         min="0"
         step={step}
-        value={value}
-        onChange={(event) => onChange(readNumber(event.target.value))}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={(event) => commitValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            commitValue(event.currentTarget.value);
+            event.currentTarget.blur();
+          }
+        }}
       />
     </label>
   );
@@ -589,7 +629,7 @@ function formatSavedTime(isoString) {
   }).format(date);
 }
 
-function HousingCard({ title, item, fields, totals, onFieldChange, children }) {
+function HousingCard({ title, item, fields, totals, onFieldChange, beforeGrid, children }) {
   return (
     <article className="card card-highlight">
       <h2>{title}</h2>
@@ -597,6 +637,7 @@ function HousingCard({ title, item, fields, totals, onFieldChange, children }) {
         value={item.adresse}
         onChange={(value) => onFieldChange("adresse", value)}
       />
+      {beforeGrid}
       <div className="grid">
         {fields.map((field) =>
           field.type === "date" ? (
@@ -738,8 +779,6 @@ const statusQuoFields = [
   { key: "kjopspris", label: "Kjøpspris (kr)" },
   { key: "egenkapitalVedKjop", label: "Egenkapital ved kjøp (kr)" },
   { key: "boarealKvm", label: "Boareal (kvm)", step: 1 },
-  { key: "verdistigningAarlig", label: "Estimert verdistigning (%/år)", step: 0.1 },
-  { key: "verdiIDag", label: "Verdi i dag – manuell (kr)" },
   { key: "restgjeld", label: "Restgjeld i dag (kr, 0 = auto)" },
   { key: "rente", label: "Rente på lån (%)", step: 0.1 },
   { key: "nedbetalingstid", label: "Opprinnelig lånetid (år)", step: 1 },
@@ -780,6 +819,24 @@ export default function App() {
   const [lastSavedAt, setLastSavedAt] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const [authUser, setAuthUser] = useState(null);
+  const [theme, setTheme] = useState(() => {
+    const initial = getInitialTheme();
+    applyThemeToDocument(initial);
+    return initial;
+  });
+
+  useEffect(() => {
+    applyThemeToDocument(theme);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // localStorage utilgjengelig
+    }
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  };
 
   const payloadDefaults = useMemo(
     () => ({ defaultStatusQuo, defaultNyBolig, emptyForm }),
@@ -944,13 +1001,7 @@ export default function App() {
   const moveDeltaYearly = nyBoligCostYearly - statusQuoTotals.yearlyTotal;
 
   const setVerdiModus = (modus) => {
-    setStatusQuo((current) => {
-      const next = { ...current, verdiModus: modus };
-      if (modus === "manuell" && current.verdiModus === "estimert") {
-        next.verdiIDag = statusQuoTotals.estimertVerdi;
-      }
-      return next;
-    });
+    setStatusQuo((current) => ({ ...current, verdiModus: modus }));
     setShareStatus(
       modus === "estimert"
         ? "Beregninger bruker estimert prisstigning."
@@ -1132,12 +1183,15 @@ export default function App() {
       if (target === "naa") {
         setStatusQuo((current) => applyListingToStatusQuo(current, data));
       } else {
-        setNyBolig((current) => applyListingImport(current, data));
+        setNyBolig((current) => applyListingToNyBolig(current, data));
       }
+      const tilstandMsg = data.tilstandsrapportFunnet
+        ? " Tilstandsrapport: tiltak hentet."
+        : "";
       setImportStatus(
         data.funnet
-          ? `${label}: importert fra ${describeImportSource(data)}.`
-          : `${label}: fant ingen tall automatisk.`,
+          ? `${label}: importert fra ${describeImportSource(data)}.${tilstandMsg}`
+          : `${label}: fant ingen tall automatisk.${tilstandMsg}`,
       );
     } catch (error) {
       setImportStatus(error instanceof Error ? error.message : "Noe gikk galt ved import.");
@@ -1168,17 +1222,17 @@ export default function App() {
         updatedStatusQuo = applyListingToStatusQuo(updatedStatusQuo, dataNaa);
         messages.push(
           dataNaa.funnet
-            ? `Nåværende bolig: ${describeImportSource(dataNaa)}`
+            ? `Nåværende bolig: ${describeImportSource(dataNaa)}${dataNaa.tilstandsrapportFunnet ? " + tilstandsrapport" : ""}`
             : "Nåværende bolig: ingen gjenkjente tall",
         );
       }
 
       if (hasNy) {
         const dataNy = await fetchFinnListing(finnUrlNy);
-        updatedNyBolig = applyListingImport(updatedNyBolig, dataNy);
+        updatedNyBolig = applyListingToNyBolig(updatedNyBolig, dataNy);
         messages.push(
           dataNy.funnet
-            ? `Ny bolig: ${describeImportSource(dataNy)}`
+            ? `Ny bolig: ${describeImportSource(dataNy)}${dataNy.tilstandsrapportFunnet ? " + tilstandsrapport" : ""}`
             : "Ny bolig: ingen gjenkjente tall",
         );
       }
@@ -1208,11 +1262,22 @@ export default function App() {
 
   return (
     <main className="page">
-      <header>
-        <h1>Kalkulator for boligkostnader</h1>
-        <p>
-          Sammenlign nåværende bolig med en ny, eller flere boformer side om side.
-        </p>
+      <header className="page-header">
+        <div className="page-header-text">
+          <h1>Kalkulator for boligkostnader</h1>
+          <p>
+            Sammenlign nåværende bolig med en ny, eller flere boformer side om side.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="button theme-toggle"
+          onClick={toggleTheme}
+          aria-pressed={theme === "dark"}
+          aria-label={theme === "dark" ? "Bytt til lyst tema" : "Bytt til mørkt tema"}
+        >
+          {theme === "dark" ? "Lys modus" : "Mørk modus"}
+        </button>
       </header>
 
       <AuthPanel user={authUser} onAuthChange={setAuthUser} />
@@ -1303,7 +1368,7 @@ export default function App() {
         <p>
           {activeTab === "flytt"
             ? "Lim inn FINN-lenke for hver bolig – også utgåtte annonser. Vi henter fra lagret annonsedata, side og ev. arkivert kopi."
-            : "Henter tall fra FINN og salgsoppgave – også utgåtte annonser (PDF, nettside eller arkiv)."}
+            : "Henter tall fra FINN, salgsoppgave og tilstandsrapport – også utgåtte annonser."}
         </p>
 
         {activeTab === "flytt" ? (
@@ -1398,17 +1463,91 @@ export default function App() {
             <HousingCard
               title={statusQuo.name}
               item={statusQuo}
-              fields={statusQuoFields.filter((field) => {
-                if (field.key === "verdistigningAarlig") {
-                  return statusQuo.verdiModus === "estimert";
-                }
-                if (field.key === "verdiIDag") {
-                  return statusQuo.verdiModus === "manuell";
-                }
-                return true;
-              })}
+              fields={statusQuoFields}
               onFieldChange={(field, value) =>
                 setStatusQuo((current) => ({ ...current, [field]: value }))
+              }
+              beforeGrid={
+                <div className="verdi-panel verdi-panel-first">
+                  <fieldset className="verdi-modus">
+                    <legend>Verdi i dag – utgangspunkt for beregninger</legend>
+                    <label className="radio-field">
+                      <input
+                        type="radio"
+                        name="verdiModus"
+                        checked={statusQuo.verdiModus !== "estimert"}
+                        onChange={() => setVerdiModus("manuell")}
+                      />
+                      <span>Manuell verdi i dag</span>
+                    </label>
+                    <label className="radio-field">
+                      <input
+                        type="radio"
+                        name="verdiModus"
+                        checked={statusQuo.verdiModus === "estimert"}
+                        onChange={() => setVerdiModus("estimert")}
+                      />
+                      <span>Estimert prisstigning (kommune + %/år)</span>
+                    </label>
+                  </fieldset>
+                  {statusQuo.verdiModus === "estimert" ? (
+                    <>
+                      <label className="field">
+                        <span>Kommune</span>
+                        <select
+                          value={statusQuo.kommune}
+                          onChange={(event) => {
+                            const kommune = event.target.value;
+                            setStatusQuo((current) => ({
+                              ...current,
+                              kommune,
+                              verdistigningAarlig: getKommuneRate(kommune),
+                            }));
+                          }}
+                        >
+                          {KOMMUNER.map((item) => (
+                            <option key={item.key} value={item.key}>
+                              {item.label} (ca. {item.verdistigningAarlig} %/år)
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <CostInput
+                        label="Estimert verdistigning (%/år)"
+                        value={statusQuo.verdistigningAarlig}
+                        onChange={(value) =>
+                          setStatusQuo((current) => ({
+                            ...current,
+                            verdistigningAarlig: value,
+                          }))
+                        }
+                        step={0.1}
+                      />
+                      <p className="hint">
+                        Egenkapital og netto fra salg beregnes fra estimatet (kjøpspris, tid,
+                        prisstigning og kvm).
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <CostInput
+                        label="Verdi i dag – manuell (kr)"
+                        value={statusQuo.verdiIDag}
+                        onChange={(value) =>
+                          setStatusQuo((current) => ({
+                            ...current,
+                            verdiIDag: value,
+                            verdiModus: "manuell",
+                          }))
+                        }
+                      />
+                      <p className="hint">
+                        Trykk Enter eller Tab for å oppdatere. Estimert verdi vises under
+                        resultatene.
+                      </p>
+                    </>
+                  )}
+                </div>
               }
               children={
                 <>
@@ -1446,66 +1585,22 @@ export default function App() {
                     engangskostnad da du kjøpte nåværende bolig.
                   </p>
                 </div>
-                <div className="verdi-panel">
-                  <fieldset className="verdi-modus">
-                    <legend>Verdi i dag – utgangspunkt for beregninger</legend>
-                    <label className="radio-field">
-                      <input
-                        type="radio"
-                        name="verdiModus"
-                        checked={statusQuo.verdiModus === "estimert"}
-                        onChange={() => setVerdiModus("estimert")}
-                      />
-                      <span>Estimert prisstigning (kommune + %/år)</span>
-                    </label>
-                    <label className="radio-field">
-                      <input
-                        type="radio"
-                        name="verdiModus"
-                        checked={statusQuo.verdiModus !== "estimert"}
-                        onChange={() => setVerdiModus("manuell")}
-                      />
-                      <span>Manuell verdi i dag</span>
-                    </label>
-                  </fieldset>
-                  {statusQuo.verdiModus === "estimert" ? (
-                    <>
-                      <label className="field">
-                        <span>Kommune</span>
-                        <select
-                          value={statusQuo.kommune}
-                          onChange={(event) => {
-                            const kommune = event.target.value;
-                            setStatusQuo((current) => ({
-                              ...current,
-                              kommune,
-                              verdistigningAarlig: getKommuneRate(kommune),
-                            }));
-                          }}
-                        >
-                          {KOMMUNER.map((item) => (
-                            <option key={item.key} value={item.key}>
-                              {item.label} (ca. {item.verdistigningAarlig} %/år)
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <p className="hint">
-                        Estimatet er forenklet: kjøpspris, tid siden overtakelse, valgt
-                        prisstigning og kvm. Egenkapital og netto fra salg beregnes fra dette.
-                      </p>
-                    </>
-                  ) : (
-                    <p className="hint">
-                      Fyll inn «Verdi i dag – manuell» over. Estimert verdi vises som sammenligning
-                      under resultatene.
-                    </p>
-                  )}
-                </div>
+                <TilstandsrapportPanel
+                  title="Tilstandsrapport (nåværende bolig)"
+                  home={statusQuo}
+                  onUpdate={setStatusQuo}
+                  onStatus={setImportStatus}
+                />
                 </>
               }
               totals={
                 <>
+                  {statusQuo.engangsTiltakTilstand > 0 ? (
+                    <p>
+                      Nødvendige tiltak (tilstandsrapport):{" "}
+                      <strong>{asCurrency(statusQuo.engangsTiltakTilstand)}</strong>
+                    </p>
+                  ) : null}
                   {statusQuo.dokumentavgiftAktivert ? (
                     <>
                       <p>
@@ -1631,6 +1726,12 @@ export default function App() {
                     </div>
                   ) : null}
                 </div>
+                <TilstandsrapportPanel
+                  title="Tilstandsrapport (ny bolig)"
+                  home={nyBolig}
+                  onUpdate={setNyBolig}
+                  onStatus={setImportStatus}
+                />
                 </>
               }
               totals={
@@ -1670,12 +1771,25 @@ export default function App() {
                     Flyttekostnader:{" "}
                     <strong>{asCurrency(nyBoligTotals.flyttekostnader)}</strong>
                   </p>
+                  {nyBoligTotals.engangsTiltakTilstand > 0 ? (
+                    <p>
+                      Tiltak etter tilstandsrapport:{" "}
+                      <strong>{asCurrency(nyBoligTotals.engangsTiltakTilstand)}</strong>
+                    </p>
+                  ) : null}
                   <p>
-                    Sum dok.avg. + flytt:{" "}
+                    Sum engangskostnader ved kjøp:{" "}
+                    <strong>{asCurrency(nyBoligTotals.engangskostnader)}</strong>
+                  </p>
+                  <p className="hint">
+                    Inkl. dokumentavgift, flytt og nødvendige tiltak fra tilstandsrapport.
+                  </p>
+                  <p>
+                    Kontanter til dok. + flytt + tiltak:{" "}
                     <strong>{asCurrency(nyBoligTotals.kontanterTilDokOgFlytt)}</strong>
                   </p>
                   <p>
-                    Kontanter fra egen lomme (ekstra egenkap. + dok. + flytt):{" "}
+                    Kontanter fra egen lomme (ekstra egenkap. + engangskostnader):{" "}
                     <strong>{asCurrency(nyBoligTotals.kontanterFraLomme)}</strong>
                   </p>
                   <p>
@@ -1820,44 +1934,74 @@ export default function App() {
                 Differanser vises mot <strong>{baseline.name}</strong>.
               </p>
             ) : null}
-            <div className="comparison-grid">
-              {sortedResults.map((result) => (
-                <article key={result.id} className="comparison-card">
-                  <h3>{result.name}</h3>
-                  <p>
-                    Månedlig total: <strong>{asCurrency(result.totals.monthlyTotal)}</strong>
-                  </p>
-                  <p>
-                    Årlig total: <strong>{asCurrency(result.totals.yearlyTotal)}</strong>
-                  </p>
-                  {baseline && baseline.id !== result.id ? (
-                    <>
-                      <p>
-                        Differanse per måned:{" "}
-                        <strong
-                          className={differenceClassName(
-                            result.totals.monthlyTotal - baseline.totals.monthlyTotal,
-                          )}
-                        >
-                          {asCurrency(
-                            result.totals.monthlyTotal - baseline.totals.monthlyTotal,
-                          )}
-                        </strong>
-                      </p>
-                      <p>
-                        Differanse per år:{" "}
-                        <strong
-                          className={differenceClassName(
-                            result.totals.yearlyTotal - baseline.totals.yearlyTotal,
-                          )}
-                        >
-                          {asCurrency(result.totals.yearlyTotal - baseline.totals.yearlyTotal)}
-                        </strong>
-                      </p>
-                    </>
-                  ) : null}
-                </article>
-              ))}
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Boform</th>
+                    <th scope="col" className="num">
+                      Per måned
+                    </th>
+                    <th scope="col" className="num">
+                      Per år
+                    </th>
+                    {baseline ? (
+                      <>
+                        <th scope="col" className="num">
+                          Δ måned
+                        </th>
+                        <th scope="col" className="num">
+                          Δ år
+                        </th>
+                      </>
+                    ) : null}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedResults.map((result) => {
+                    const deltaMonthly = baseline
+                      ? result.totals.monthlyTotal - baseline.totals.monthlyTotal
+                      : 0;
+                    const deltaYearly = baseline
+                      ? result.totals.yearlyTotal - baseline.totals.yearlyTotal
+                      : 0;
+                    const isBaseline = baseline?.id === result.id;
+
+                    return (
+                      <tr
+                        key={result.id}
+                        className={isBaseline ? "row-baseline" : undefined}
+                      >
+                        <td>{result.adresse?.trim() || result.name}</td>
+                        <td className="num">{asCurrency(result.totals.monthlyTotal)}</td>
+                        <td className="num">{asCurrency(result.totals.yearlyTotal)}</td>
+                        {baseline ? (
+                          <>
+                            <td className="num">
+                              {isBaseline ? (
+                                "—"
+                              ) : (
+                                <span className={differenceClassName(deltaMonthly)}>
+                                  {asCurrency(deltaMonthly)}
+                                </span>
+                              )}
+                            </td>
+                            <td className="num">
+                              {isBaseline ? (
+                                "—"
+                              ) : (
+                                <span className={differenceClassName(deltaYearly)}>
+                                  {asCurrency(deltaYearly)}
+                                </span>
+                              )}
+                            </td>
+                          </>
+                        ) : null}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </section>
         </>
