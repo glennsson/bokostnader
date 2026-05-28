@@ -1,0 +1,233 @@
+================================================================================
+  BOLIGKOSTNADER-KALKULATOR – GUIDE TIL DELING OG PUBLISERING
+================================================================================
+Opprettet: 28. mai 2026
+Prosjektmappe: C:\Mine dokumenter\KI-App-prosjekter\bokostnader
+
+Denne filen forklarer hva som er satt opp, hvorfor, og hvordan DU publiserer
+appen på nett (Vercel) og deler den med andre.
+
+
+--------------------------------------------------------------------------------
+1. KORT OPPSUMMERING AV APPEN
+--------------------------------------------------------------------------------
+
+Appen er bygget med:
+  - React (brukergrensesnitt)
+  - Vite (byggeverktøy / dev-server)
+  - Express (kun lokalt, for FINN-import under utvikling)
+  - Vercel Serverless API (FINN-import i produksjon på nett)
+
+Du har to hovedfaner:
+  A) Status quo vs ny bolig  – sammenlign dagens bolig med en du vurderer
+  B) Sammenlign flere boformer – f.eks. enebolig vs rekkehus
+
+Ekstra funksjoner:
+  - FINN-import (lim inn annonse-URL)
+  - Eksport CSV/PDF (fanen «flere boformer»)
+  - Kopier delbar lenke (sender med alle tall i URL-en)
+
+
+--------------------------------------------------------------------------------
+2. HVORFOR IKKE STREAMLIT?
+--------------------------------------------------------------------------------
+
+Streamlit er et Python-rammeverk for enkle webapper. Din app er allerede
+ferdig i React. Å flytte til Streamlit ville betydd:
+
+  - Skrive all logikk på nytt i Python
+  - Bygge UI på nytt
+  - FINN-import måtte lages separat
+
+Anbefaling: Behold React og publiser på Vercel (gratis, enkel, delbar URL).
+
+
+--------------------------------------------------------------------------------
+3. HVA JEG SATTE OPP FOR PUBLISERING
+--------------------------------------------------------------------------------
+
+Filer som ble lagt til/endret for deploy og deling:
+
+  vercel.json
+    - Forteller Vercel at den skal kjøre «npm run build»
+    - Publiserer mappen «dist» som nettside
+    - Sender alle ruter (unntatt /api) til index.html (SPA)
+
+  api/finn/extract.js
+    - Serverless-funksjon på Vercel
+    - Samme jobb som server.js lokalt: henter FINN-side og parser pris/avgifter
+    - URL i produksjon: https://DIN-APP.vercel.app/api/finn/extract
+
+  lib/finn-extract.js
+    - Felles parsing-logikk brukt av både server.js (lokalt) og Vercel API
+
+  server.js (oppdatert)
+    - Bruker nå lib/finn-extract.js (mindre duplisering)
+
+  src/share.js
+    - Koder avkrypterer kalkulatordata i URL-parameteren ?d=...
+    - Brukes av knappen «Kopier delbar lenke»
+
+  .gitignore
+    - Ekskluderer node_modules, dist, .env (skal ikke lastes til GitHub)
+
+  README.md
+    - Kort teknisk dokumentasjon på norsk
+
+
+--------------------------------------------------------------------------------
+4. SLIK FUNGERER «KOPIER DELBAR LENKE»
+--------------------------------------------------------------------------------
+
+1. Du fyller inn tall i kalkulatoren.
+2. Appen pakker data (faner, status quo, ny bolig, boformer) som JSON.
+3. JSON konverteres til Base64 og legges i URL: ?d=XXXX
+4. Når noen åpner lenken, leser appen parameteren og fyller inn feltene.
+
+Merk:
+  - Lenken kan bli lang ved mange boformer (det er normalt).
+  - Data ligger i URL-en – ikke send sensitive data du ikke vil dele.
+
+
+--------------------------------------------------------------------------------
+5. KJØRE LOKALT (PÅ DIN PC)
+--------------------------------------------------------------------------------
+
+Åpne PowerShell i prosjektmappen og kjør:
+
+  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+  npm install
+  npm run dev
+
+Åpne URL-en Vite viser (f.eks. http://localhost:5173/ eller 5174/).
+
+Hvis du får «port already in use»:
+  - Stopp gamle terminaler med Ctrl+C
+  - Eller bruk den nye porten Vite foreslår (5174, 5175, …)
+
+Hvis npm feiler med «running scripts is disabled»:
+  - Kjør Set-ExecutionPolicy-kommandoen over først (kun denne terminalen).
+
+
+--------------------------------------------------------------------------------
+6. GIT OG GITHUB – STEG FOR STEG
+--------------------------------------------------------------------------------
+
+Git er versjonskontroll. GitHub er lagring i skyen. Vercel henter koden derfra.
+
+STEG 6.1 – Git er initialisert i prosjektmappen
+  (første commit er laget automatisk når denne guiden ble skrevet)
+
+STEG 6.2 – Opprett repository på GitHub
+  1. Gå til https://github.com/new
+  2. Repository name: f.eks. bokostnader
+  3. Velg Private eller Public
+  4. IKKE kryss av for «Add a README» (du har allerede filer lokalt)
+  5. Klikk Create repository
+
+STEG 6.3 – Koble lokalt prosjekt til GitHub (erstatt BRUKERNAVN)
+
+  cd "C:\Mine dokumenter\KI-App-prosjekter\bokostnader"
+  git remote add origin https://github.com/BRUKERNAVN/bokostnader.git
+  git branch -M main
+  git push -u origin main
+
+  Ved første push kan GitHub be om innlogging:
+  - Bruk Personal Access Token som passord, eller GitHub CLI (gh auth login)
+
+STEG 6.4 – Senere endringer
+
+  git add .
+  git commit -m "Beskriv hva du endret"
+  git push
+
+
+--------------------------------------------------------------------------------
+7. VERCEL – PUBLISER PÅ NETT (GRATIS)
+--------------------------------------------------------------------------------
+
+STEG 7.1 – Opprett konto
+  1. Gå til https://vercel.com
+  2. Registrer deg (enklest: «Continue with GitHub»)
+
+STEG 7.2 – Importer prosjekt
+  1. Klikk «Add New…» → «Project»
+  2. Velg GitHub-repoet «bokostnader»
+  3. Framework Preset: Vite (ofte auto-detektert)
+  4. Build Command: npm run build  (fra vercel.json)
+  5. Output Directory: dist         (fra vercel.json)
+  6. Klikk Deploy
+
+STEG 7.3 – Vent 1–2 minutter
+  Du får en URL, f.eks.:
+    https://bokostnader-xxxxx.vercel.app
+
+STEG 7.4 – Automatiske oppdateringer
+  Hver gang du kjører «git push», bygger Vercel appen på nytt automatisk.
+
+
+--------------------------------------------------------------------------------
+8. TEST ETTER PUBLISERING
+--------------------------------------------------------------------------------
+
+  [ ] Åpne Vercel-URL i nettleser – kalkulatoren vises
+  [ ] Fyll inn tall på «Status quo vs ny bolig»
+  [ ] Klikk «Kopier delbar lenke» – åpne i inkognito – data skal være der
+  [ ] Test FINN-import med en ekte annonse-URL (kan feile på noen annonser)
+
+
+--------------------------------------------------------------------------------
+9. FEILSØKING
+--------------------------------------------------------------------------------
+
+Problem: Blank side i nettleser
+  - Sjekk F12 → Console for feilmeldinger
+  - Sørg for @vitejs/plugin-react er installert (npm install)
+  - Hard refresh: Ctrl+F5
+
+Problem: FINN-import virker ikke på Vercel
+  - FINN kan blokkere server-henting av enkelte annonser
+  - Prøv en annen annonse-URL
+  - Sjekk Vercel → Project → Logs → Functions
+
+Problem: EADDRINUSE port 8787
+  - En gammel server.js kjører fortsatt – stopp med Ctrl+C eller restart PC
+
+Problem: npm ikke funnet
+  - Installer Node LTS: winget install OpenJS.NodeJS.LTS
+  - Lukk og åpne terminal på nytt
+
+
+--------------------------------------------------------------------------------
+10. FILSTRUKTUR (OVERSIKT)
+--------------------------------------------------------------------------------
+
+bokostnader/
+  api/finn/extract.js    → Vercel API (produksjon)
+  lib/finn-extract.js    → Felles FINN-parser
+  server.js              → Lokal API (utvikling)
+  src/
+    App.jsx              → Hovedapp
+    App.css              → Stiler
+    main.jsx             → Oppstart
+    share.js             → Delbar lenke
+  index.html
+  package.json
+  vite.config.js
+  vercel.json
+  README.md
+  DEPLOY-GUIDE.txt       → Denne filen
+
+
+--------------------------------------------------------------------------------
+11. KONTAKT / VIDERE UTVIKLING
+--------------------------------------------------------------------------------
+
+Mulige neste steg:
+  - Eget domenenavn på Vercel (f.eks. boligkostnader.no)
+  - PDF-eksport også for flytte-sammenligning
+  - Bedre FINN-parsing eller manuell lim-inn av salgsoppgave
+
+Lykke til med publisering!
+
+================================================================================
