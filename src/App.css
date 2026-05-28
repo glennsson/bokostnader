@@ -142,6 +142,30 @@ p {
   font-size: 0.88rem;
 }
 
+.utleie-panel,
+.verdi-panel {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed #d1d5db;
+}
+
+.verdi-panel .button {
+  margin-top: 0.5rem;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.checkbox-field input {
+  margin-top: 0.2rem;
+}
+
 .card-header {
   display: flex;
   justify-content: space-between;
@@ -188,6 +212,16 @@ p {
   margin-top: 1rem;
   border-top: 1px solid #e5e7eb;
   padding-top: 0.75rem;
+}
+
+.result-heading {
+  margin: 0.75rem 0 0.35rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.result-heading:first-child {
+  margin-top: 0;
 }
 
 .comparison {

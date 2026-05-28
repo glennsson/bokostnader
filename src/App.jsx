@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { buildShareUrl, readShareFromUrl } from "./share";
+import {
+  estimateBoligverdi,
+  getKommuneRate,
+  KOMMUNER,
+  calculateVerdistigning,
+} from "../lib/verdiestimat.js";
 
 const MONTHS_PER_YEAR = 12;
 
@@ -137,6 +143,9 @@ const defaultStatusQuo = {
   kjopspris: 4200000,
   egenkapitalVedKjop: 840000,
   verdiIDag: 5200000,
+  kommune: "oslo",
+  boarealKvm: 85,
+  verdistigningAarlig: 5.5,
   restgjeld: 0,
   rente: 4.8,
   nedbetalingstid: 25,
@@ -158,9 +167,84 @@ const defaultNyBolig = {
   vedlikeholdAarlig: 30000,
   felleskostnaderMnd: 0,
   flyttekostnader: 80000,
+  dokumentavgiftProsent: 2.5,
+  dokumentavgiftAktivert: true,
+  utleieAktivert: false,
+  utleieInntektMnd: 0,
+  skattefriGrenseAar: 20000,
+  skattesatsProsent: 22,
+  utleieEkstraForsikringAar: 3500,
+  utleieEkstraSlitasjeProsent: 8,
+  utleieEkstraStromVannAar: 6000,
+  utleieEkstraAnnetAar: 2000,
 };
 
+function calculateUtleie(nyBolig) {
+  if (!nyBolig.utleieAktivert || nyBolig.utleieInntektMnd <= 0) {
+    return {
+      bruttoAar: 0,
+      ekstraKostnaderAar: 0,
+      skattAar: 0,
+      skattefriDel: 0,
+      nettoInntektMnd: 0,
+    };
+  }
+
+  const bruttoAar = nyBolig.utleieInntektMnd * MONTHS_PER_YEAR;
+  const slitasjeAar = bruttoAar * (nyBolig.utleieEkstraSlitasjeProsent / 100);
+  const ekstraKostnaderAar =
+    nyBolig.utleieEkstraForsikringAar +
+    slitasjeAar +
+    nyBolig.utleieEkstraStromVannAar +
+    nyBolig.utleieEkstraAnnetAar;
+  const skattefriDel = Math.min(bruttoAar, nyBolig.skattefriGrenseAar);
+  const skattepliktig = Math.max(0, bruttoAar - nyBolig.skattefriGrenseAar);
+  const skattAar = skattepliktig * (nyBolig.skattesatsProsent / 100);
+  const nettoAar = bruttoAar - ekstraKostnaderAar - skattAar;
+
+  return {
+    bruttoAar,
+    ekstraKostnaderAar,
+    skattAar,
+    skattefriDel,
+    nettoInntektMnd: nettoAar / MONTHS_PER_YEAR,
+  };
+}
+
+function applyListingImport(current, data) {
+  const next = { ...current };
+  if (data.boligpris != null) next.boligpris = data.boligpris;
+  if (data.felleskostnaderMnd != null) next.felleskostnaderMnd = data.felleskostnaderMnd;
+  if (data.kommunaleAarlig != null) next.kommunaleAarlig = data.kommunaleAarlig;
+  if (data.vedlikeholdAarlig != null) next.vedlikeholdAarlig = data.vedlikeholdAarlig;
+  if (data.driftAarlig != null) next.driftAarlig = data.driftAarlig;
+  if (
+    data.utleieInntektMnd != null &&
+    data.utleieInntektMnd > 0 &&
+    Object.prototype.hasOwnProperty.call(current, "utleieAktivert")
+  ) {
+    next.utleieAktivert = true;
+    next.utleieInntektMnd = data.utleieInntektMnd;
+  }
+  return next;
+}
+
+function calculateDokumentavgift(nyBolig) {
+  if (!nyBolig.dokumentavgiftAktivert) {
+    return 0;
+  }
+  return nyBolig.boligpris * (nyBolig.dokumentavgiftProsent / 100);
+}
+
 function calculateStatusQuo(statusQuo) {
+  const estimertVerdi = estimateBoligverdi({
+    kjopspris: statusQuo.kjopspris,
+    aarBodd: statusQuo.aarBodd,
+    verdistigningAarlig: statusQuo.verdistigningAarlig,
+    boarealKvm: statusQuo.boarealKvm,
+  });
+  const verdistigning = calculateVerdistigning(statusQuo.kjopspris, estimertVerdi);
+
   const laanVedKjop = Math.max(0, statusQuo.kjopspris - statusQuo.egenkapitalVedKjop);
   const beregnetRestgjeld = remainingLoanBalance(
     laanVedKjop,
@@ -192,6 +276,8 @@ function calculateStatusQuo(statusQuo) {
     yearlyTotal: monthlyTotal * MONTHS_PER_YEAR,
     egenkapital,
     nettoFraSalg,
+    estimertVerdi,
+    verdistigning,
   };
 }
 
@@ -206,17 +292,32 @@ function calculateNyBolig(nyBolig, nettoFraSalg) {
   );
   const operating = calculateOperatingCosts(nyBolig);
   const monthlyTotal = monthlyLoanCost + operating.monthlyTotal;
+  const utleie = calculateUtleie(nyBolig);
+  const monthlyNetCost = monthlyTotal - utleie.nettoInntektMnd;
+  const dokumentavgift = calculateDokumentavgift(nyBolig);
+  const engangskostnader = nyBolig.flyttekostnader + dokumentavgift;
+  const kontanterTilDokOgFlytt = engangskostnader;
+  const kontanterFraLomme =
+    nyBolig.kontanterEgenkapital + kontanterTilDokOgFlytt;
 
   return {
     egenkapitalFraSalg,
     kontanterEgenkapital: nyBolig.kontanterEgenkapital,
     totalEgenkapital,
+    boligpris: nyBolig.boligpris,
     laan,
+    kontanterTilDokOgFlytt,
+    kontanterFraLomme,
     monthlyLoanCost,
     yearlyRunningCosts: operating.yearlyRunningCosts,
     monthlyTotal,
     yearlyTotal: monthlyTotal * MONTHS_PER_YEAR,
+    monthlyNetCost,
+    yearlyNetCost: monthlyNetCost * MONTHS_PER_YEAR,
     flyttekostnader: nyBolig.flyttekostnader,
+    dokumentavgift,
+    engangskostnader,
+    utleie,
   };
 }
 
@@ -354,7 +455,7 @@ function CostInput({ label, value, onChange, step = 1000 }) {
   );
 }
 
-function HousingCard({ title, item, fields, totals, onFieldChange }) {
+function HousingCard({ title, item, fields, totals, onFieldChange, children }) {
   return (
     <article className="card card-highlight">
       <h2>{title}</h2>
@@ -369,10 +470,21 @@ function HousingCard({ title, item, fields, totals, onFieldChange }) {
           />
         ))}
       </div>
+      {children}
       <div className="result">{totals}</div>
     </article>
   );
 }
+
+const utleieFields = [
+  { key: "utleieInntektMnd", label: "Brutto leieinntekt per måned (kr)" },
+  { key: "skattefriGrenseAar", label: "Skattefri grense per år (kr)", step: 1000 },
+  { key: "skattesatsProsent", label: "Skatt på overskudd (%)", step: 0.1 },
+  { key: "utleieEkstraForsikringAar", label: "Ekstra forsikring utleie (kr/år)" },
+  { key: "utleieEkstraSlitasjeProsent", label: "Slitasje/vedlikehold (% av leie)", step: 1 },
+  { key: "utleieEkstraStromVannAar", label: "Strøm/vann andel (kr/år)" },
+  { key: "utleieEkstraAnnetAar", label: "Annet (regnskap, fellesareal) (kr/år)" },
+];
 
 function FormCard({ item, onUpdate, onRemove, totals, canRemove }) {
   const updateField = (field, value) => {
@@ -471,7 +583,9 @@ const statusQuoFields = [
   { key: "aarBodd", label: "År bodd i boligen", step: 1 },
   { key: "kjopspris", label: "Kjøpspris (kr)" },
   { key: "egenkapitalVedKjop", label: "Egenkapital ved kjøp (kr)" },
-  { key: "verdiIDag", label: "Estimert verdi i dag (kr)" },
+  { key: "boarealKvm", label: "Boareal (kvm)", step: 1 },
+  { key: "verdistigningAarlig", label: "Estimert verdistigning (%/år)", step: 0.1 },
+  { key: "verdiIDag", label: "Verdi i dag – manuell (kr)" },
   { key: "restgjeld", label: "Restgjeld i dag (kr, 0 = auto)" },
   { key: "rente", label: "Rente på lån (%)", step: 0.1 },
   { key: "nedbetalingstid", label: "Opprinnelig lånetid (år)", step: 1 },
@@ -487,6 +601,7 @@ const nyBoligFields = [
   { key: "kontanterEgenkapital", label: "Ekstra kontanter til egenkapital (kr)" },
   { key: "rente", label: "Rente på nytt lån (%)", step: 0.1 },
   { key: "nedbetalingstid", label: "Nedbetalingstid (år)", step: 1 },
+  { key: "dokumentavgiftProsent", label: "Dokumentavgift (%)", step: 0.1 },
   { key: "flyttekostnader", label: "Engangs flyttekostnader (kr)" },
   { key: "driftAarlig", label: "Driftskostnader årlig (kr)" },
   { key: "kommunaleAarlig", label: "Kommunale avgifter årlig (kr)" },
@@ -536,8 +651,23 @@ export default function App() {
     [nyBolig, statusQuoTotals.nettoFraSalg],
   );
 
-  const moveDeltaMonthly = nyBoligTotals.monthlyTotal - statusQuoTotals.monthlyTotal;
-  const moveDeltaYearly = nyBoligTotals.yearlyTotal - statusQuoTotals.yearlyTotal;
+  const nyBoligCostMonthly = nyBolig.utleieAktivert
+    ? nyBoligTotals.monthlyNetCost
+    : nyBoligTotals.monthlyTotal;
+  const nyBoligCostYearly = nyBolig.utleieAktivert
+    ? nyBoligTotals.yearlyNetCost
+    : nyBoligTotals.yearlyTotal;
+
+  const moveDeltaMonthly = nyBoligCostMonthly - statusQuoTotals.monthlyTotal;
+  const moveDeltaYearly = nyBoligCostYearly - statusQuoTotals.yearlyTotal;
+
+  const applyEstimatedValue = () => {
+    setStatusQuo((current) => ({
+      ...current,
+      verdiIDag: statusQuoTotals.estimertVerdi,
+    }));
+    setShareStatus("Estimert verdi er lagt inn som «Verdi i dag».");
+  };
 
   const copyShareLink = async () => {
     const url = buildShareUrl({
@@ -616,29 +746,34 @@ export default function App() {
       }
 
       if (activeTab === "flytt") {
-        setNyBolig((current) => ({
-          ...current,
-          boligpris: data.boligpris ?? current.boligpris,
-          felleskostnaderMnd: data.felleskostnaderMnd ?? current.felleskostnaderMnd,
-          kommunaleAarlig: data.kommunaleAarlig ?? current.kommunaleAarlig,
-        }));
-        setImportStatus("Data hentet og fylt inn i ny bolig.");
+        setNyBolig((current) => applyListingImport(current, data));
       } else {
         setForms((current) =>
           current.map((form) => {
             if (form.id !== effectiveTargetFormId) {
               return form;
             }
-            return {
-              ...form,
-              boligpris: data.boligpris ?? form.boligpris,
-              felleskostnaderMnd: data.felleskostnaderMnd ?? form.felleskostnaderMnd,
-              kommunaleAarlig: data.kommunaleAarlig ?? form.kommunaleAarlig,
-            };
+            return applyListingImport(form, data);
           }),
         );
-        setImportStatus("Data hentet og fylt inn i valgt boform.");
       }
+
+      const salgsoppgaveKilde =
+        data.salgsoppgaveType === "pdf"
+          ? "salgsoppgave (PDF)"
+          : data.salgsoppgaveType === "html"
+            ? "salgsoppgave (nettside)"
+            : "salgsoppgave";
+      const kilde = data.salgsoppgaveFunnet
+        ? `${salgsoppgaveKilde} og FINN-side`
+        : data.funnet
+          ? "FINN-side"
+          : "ingen gjenkjente tall";
+      setImportStatus(
+        data.funnet
+          ? `Importert fra ${kilde}. Sjekk og juster tallene.`
+          : "Fant ingen tall automatisk. Prøv en annen annonse eller fyll inn manuelt.",
+      );
     } catch {
       setImportStatus("Noe gikk galt ved import.");
     } finally {
@@ -696,8 +831,8 @@ export default function App() {
         <h2>Importer fra FINN</h2>
         <p>
           {activeTab === "flytt"
-            ? "Lim inn annonse-lenke og fyll inn data i ny bolig."
-            : "Lim inn annonse-lenke og fyll inn pris/avgifter i valgt boform."}
+            ? "Henter tall fra FINN og salgsoppgave (PDF eller lenket nettside) inn i ny bolig."
+            : "Henter tall fra FINN og salgsoppgave (PDF eller lenket nettside) inn i valgt boform."}
         </p>
         <div className="importer-controls">
           <label className="field">
@@ -748,8 +883,47 @@ export default function App() {
               onFieldChange={(field, value) =>
                 setStatusQuo((current) => ({ ...current, [field]: value }))
               }
+              children={
+                <div className="verdi-panel">
+                  <label className="field">
+                    <span>Kommune</span>
+                    <select
+                      value={statusQuo.kommune}
+                      onChange={(event) => {
+                        const kommune = event.target.value;
+                        setStatusQuo((current) => ({
+                          ...current,
+                          kommune,
+                          verdistigningAarlig: getKommuneRate(kommune),
+                        }));
+                      }}
+                    >
+                      {KOMMUNER.map((item) => (
+                        <option key={item.key} value={item.key}>
+                          {item.label} (ca. {item.verdistigningAarlig} %/år)
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="hint">
+                    Estimatet er forenklet basert på kjøpspris, år eid, kommune-snitt og kvm.
+                    Bruk «Bruk estimert verdi» eller juster manuelt.
+                  </p>
+                  <button type="button" className="button" onClick={applyEstimatedValue}>
+                    Bruk estimert verdi i dag
+                  </button>
+                </div>
+              }
               totals={
                 <>
+                  <p>
+                    Estimert verdi i dag:{" "}
+                    <strong>{asCurrency(statusQuoTotals.estimertVerdi)}</strong>
+                    <span className="hint">
+                      {" "}
+                      (+{statusQuoTotals.verdistigning.prosent.toFixed(1)} % siden kjøp)
+                    </span>
+                  </p>
                   <p>
                     Restgjeld: <strong>{asCurrency(statusQuoTotals.restgjeld)}</strong>
                     {statusQuo.restgjeld === 0 ? (
@@ -782,24 +956,148 @@ export default function App() {
               onFieldChange={(field, value) =>
                 setNyBolig((current) => ({ ...current, [field]: value }))
               }
+              children={
+                <>
+                <div className="utleie-panel">
+                  <label className="checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={nyBolig.dokumentavgiftAktivert}
+                      onChange={(event) =>
+                        setNyBolig((current) => ({
+                          ...current,
+                          dokumentavgiftAktivert: event.target.checked,
+                        }))
+                      }
+                    />
+                    <span>Inkluder dokumentavgift ved tinglysing (skjøte)</span>
+                  </label>
+                  <p className="hint">
+                    Standard dokumentavgift er 2,5 % av kjøpesum. Betales som engangskostnad ved kjøp
+                    (kommer i tillegg til lån, med mindre du dekker det med egne midler).
+                  </p>
+                </div>
+                <div className="utleie-panel">
+                  <label className="checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={nyBolig.utleieAktivert}
+                      onChange={(event) =>
+                        setNyBolig((current) => ({
+                          ...current,
+                          utleieAktivert: event.target.checked,
+                        }))
+                      }
+                    />
+                    <span>Planlegger skattefri utleie (f.eks. hybel/del av boligen)</span>
+                  </label>
+                  <p className="hint">
+                    Typisk skattefri grense for utleie av egen bolig: ca. 20 000 kr/år
+                    (justér etter egen situasjon). Overskudd over grensen beregnes med
+                    skattesatsen du legger inn.
+                  </p>
+                  {nyBolig.utleieAktivert ? (
+                    <div className="grid">
+                      {utleieFields.map((field) => (
+                        <CostInput
+                          key={field.key}
+                          label={field.label}
+                          value={nyBolig[field.key]}
+                          onChange={(value) =>
+                            setNyBolig((current) => ({ ...current, [field.key]: value }))
+                          }
+                          step={field.step ?? 1000}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                </>
+              }
               totals={
                 <>
+                  <p className="result-heading">Finansiering av boligpris</p>
                   <p>
                     Egenkapital fra salg:{" "}
                     <strong>{asCurrency(nyBoligTotals.egenkapitalFraSalg)}</strong>
                   </p>
                   <p>
+                    + Ekstra kontanter (egenkapital):{" "}
+                    <strong>{asCurrency(nyBoligTotals.kontanterEgenkapital)}</strong>
+                  </p>
+                  <p>
+                    = Total egenkapital (mot boligpris):{" "}
+                    <strong>{asCurrency(nyBoligTotals.totalEgenkapital)}</strong>
+                  </p>
+                  <p className="hint">
+                    Dokumentavgift er ikke inkludert i total egenkapital – den betales
+                    kontant ved tinglysing.
+                  </p>
+                  <p>
+                    Boligpris: <strong>{asCurrency(nyBoligTotals.boligpris)}</strong>
+                  </p>
+                  <p>
                     Nytt lånebehov: <strong>{asCurrency(nyBoligTotals.laan)}</strong>
+                  </p>
+
+                  <p className="result-heading">Kontantutgifter ved kjøp (i tillegg)</p>
+                  {nyBolig.dokumentavgiftAktivert ? (
+                    <p>
+                      Dokumentavgift ({nyBolig.dokumentavgiftProsent} %):{" "}
+                      <strong>{asCurrency(nyBoligTotals.dokumentavgift)}</strong>
+                    </p>
+                  ) : null}
+                  <p>
+                    Flyttekostnader:{" "}
+                    <strong>{asCurrency(nyBoligTotals.flyttekostnader)}</strong>
+                  </p>
+                  <p>
+                    Sum dok.avg. + flytt:{" "}
+                    <strong>{asCurrency(nyBoligTotals.kontanterTilDokOgFlytt)}</strong>
+                  </p>
+                  <p>
+                    Kontanter fra egen lomme (ekstra egenkap. + dok. + flytt):{" "}
+                    <strong>{asCurrency(nyBoligTotals.kontanterFraLomme)}</strong>
                   </p>
                   <p>
                     Månedlig lånekostnad:{" "}
                     <strong>{asCurrency(nyBoligTotals.monthlyLoanCost)}</strong>
                   </p>
                   <p>
-                    Total per måned: <strong>{asCurrency(nyBoligTotals.monthlyTotal)}</strong>
+                    Total per måned (før utleie):{" "}
+                    <strong>{asCurrency(nyBoligTotals.monthlyTotal)}</strong>
                   </p>
+                  {nyBolig.utleieAktivert ? (
+                    <>
+                      <p>
+                        Netto utleie per måned:{" "}
+                        <strong className="difference difference-positive">
+                          −{asCurrency(nyBoligTotals.utleie.nettoInntektMnd)}
+                        </strong>
+                      </p>
+                      <p>
+                        Ekstra utgifter ved utleie (år):{" "}
+                        <strong>{asCurrency(nyBoligTotals.utleie.ekstraKostnaderAar)}</strong>
+                      </p>
+                      <p>
+                        Estimert skatt av utleie (år):{" "}
+                        <strong>{asCurrency(nyBoligTotals.utleie.skattAar)}</strong>
+                      </p>
+                      <p>
+                        Din faktiske kostnad per måned:{" "}
+                        <strong>{asCurrency(nyBoligTotals.monthlyNetCost)}</strong>
+                      </p>
+                    </>
+                  ) : null}
                   <p>
-                    Total per år: <strong>{asCurrency(nyBoligTotals.yearlyTotal)}</strong>
+                    Total per år:{" "}
+                    <strong>
+                      {asCurrency(
+                        nyBolig.utleieAktivert
+                          ? nyBoligTotals.yearlyNetCost
+                          : nyBoligTotals.yearlyTotal,
+                      )}
+                    </strong>
                   </p>
                 </>
               }
@@ -824,10 +1122,13 @@ export default function App() {
               <article className="comparison-card">
                 <h3>{nyBolig.name}</h3>
                 <p>
-                  Månedlig total: <strong>{asCurrency(nyBoligTotals.monthlyTotal)}</strong>
+                  Månedlig total: <strong>{asCurrency(nyBoligCostMonthly)}</strong>
+                  {nyBolig.utleieAktivert ? (
+                    <span className="hint"> (etter utleie)</span>
+                  ) : null}
                 </p>
                 <p>
-                  Årlig total: <strong>{asCurrency(nyBoligTotals.yearlyTotal)}</strong>
+                  Årlig total: <strong>{asCurrency(nyBoligCostYearly)}</strong>
                 </p>
               </article>
               <article className="comparison-card comparison-card-delta">
@@ -845,8 +1146,16 @@ export default function App() {
                   </strong>
                 </p>
                 <p>
-                  Engangs flyttekostnad:{" "}
+                  Dokumentavgift:{" "}
+                  <strong>{asCurrency(nyBoligTotals.dokumentavgift)}</strong>
+                </p>
+                <p>
+                  Flyttekostnad:{" "}
                   <strong>{asCurrency(nyBoligTotals.flyttekostnader)}</strong>
+                </p>
+                <p>
+                  Sum engangskostnader ved kjøp:{" "}
+                  <strong>{asCurrency(nyBoligTotals.engangskostnader)}</strong>
                 </p>
                 <p className="hint">
                   Positiv differanse = dyrere å bo i ny bolig per måned/år.
