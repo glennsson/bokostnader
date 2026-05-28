@@ -71,6 +71,32 @@ function readNumber(value) {
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
 }
 
+function yearsSinceOvertakelse(overtakelsesdato) {
+  if (!overtakelsesdato) {
+    return 0;
+  }
+
+  const start = new Date(overtakelsesdato);
+  if (Number.isNaN(start.getTime())) {
+    return 0;
+  }
+
+  const now = new Date();
+  const diffMs = now.getTime() - start.getTime();
+  return Math.max(0, diffMs / (365.25 * 24 * 60 * 60 * 1000));
+}
+
+function formatDateNb(isoDate) {
+  if (!isoDate) {
+    return "";
+  }
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) {
+    return isoDate;
+  }
+  return new Intl.DateTimeFormat("nb-NO").format(date);
+}
+
 function calculateMonthlyPayment(principal, annualRatePercent, termYears) {
   const monthlyPayments = termYears * MONTHS_PER_YEAR;
   if (principal <= 0 || monthlyPayments <= 0) {
@@ -139,7 +165,7 @@ function calculateCosts(form) {
 
 const defaultStatusQuo = {
   name: "Nåværende bolig",
-  aarBodd: 5,
+  overtakelsesdato: "2021-05-28",
   kjopspris: 4200000,
   egenkapitalVedKjop: 840000,
   verdiIDag: 5200000,
@@ -154,6 +180,8 @@ const defaultStatusQuo = {
   vedlikeholdAarlig: 22000,
   felleskostnaderMnd: 0,
   salgskostnader: 150000,
+  dokumentavgiftProsent: 2.5,
+  dokumentavgiftAktivert: false,
 };
 
 const defaultNyBolig = {
@@ -211,13 +239,17 @@ function calculateUtleie(nyBolig) {
   };
 }
 
-function applyListingImport(current, data) {
-  const next = { ...current };
-  if (data.boligpris != null) next.boligpris = data.boligpris;
+function applyListingCosts(next, data) {
   if (data.felleskostnaderMnd != null) next.felleskostnaderMnd = data.felleskostnaderMnd;
   if (data.kommunaleAarlig != null) next.kommunaleAarlig = data.kommunaleAarlig;
   if (data.vedlikeholdAarlig != null) next.vedlikeholdAarlig = data.vedlikeholdAarlig;
   if (data.driftAarlig != null) next.driftAarlig = data.driftAarlig;
+  return next;
+}
+
+function applyListingImport(current, data) {
+  const next = applyListingCosts({ ...current }, data);
+  if (data.boligpris != null) next.boligpris = data.boligpris;
   if (
     data.utleieInntektMnd != null &&
     data.utleieInntektMnd > 0 &&
@@ -229,17 +261,54 @@ function applyListingImport(current, data) {
   return next;
 }
 
-function calculateDokumentavgift(nyBolig) {
-  if (!nyBolig.dokumentavgiftAktivert) {
+function applyListingToStatusQuo(statusQuo, data) {
+  const next = applyListingCosts({ ...statusQuo }, data);
+  if (data.boligpris != null) next.verdiIDag = data.boligpris;
+  return next;
+}
+
+async function fetchFinnListing(url) {
+  const response = await fetch("/api/finn/extract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: url.trim() }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data?.error ?? "Kunne ikke hente data fra FINN.");
+  }
+  return data;
+}
+
+function describeImportSource(data) {
+  const salgsoppgaveKilde =
+    data.salgsoppgaveType === "pdf"
+      ? "salgsoppgave (PDF)"
+      : data.salgsoppgaveType === "html"
+        ? "salgsoppgave (nettside)"
+        : "salgsoppgave";
+  if (data.salgsoppgaveFunnet) {
+    return `${salgsoppgaveKilde} og FINN-side`;
+  }
+  if (data.funnet) {
+    return "FINN-side";
+  }
+  return "ingen gjenkjente tall";
+}
+
+function calculateDokumentavgift(home, prisGrunnlag) {
+  if (!home.dokumentavgiftAktivert) {
     return 0;
   }
-  return nyBolig.boligpris * (nyBolig.dokumentavgiftProsent / 100);
+  return prisGrunnlag * (home.dokumentavgiftProsent / 100);
 }
 
 function calculateStatusQuo(statusQuo) {
+  const aarBodd = yearsSinceOvertakelse(statusQuo.overtakelsesdato);
+
   const estimertVerdi = estimateBoligverdi({
     kjopspris: statusQuo.kjopspris,
-    aarBodd: statusQuo.aarBodd,
+    aarBodd,
     verdistigningAarlig: statusQuo.verdistigningAarlig,
     boarealKvm: statusQuo.boarealKvm,
   });
@@ -250,11 +319,11 @@ function calculateStatusQuo(statusQuo) {
     laanVedKjop,
     statusQuo.rente,
     statusQuo.nedbetalingstid,
-    statusQuo.aarBodd,
+    aarBodd,
   );
   const restgjeld =
     statusQuo.restgjeld > 0 ? statusQuo.restgjeld : beregnetRestgjeld;
-  const gjenstaendeAar = Math.max(0, statusQuo.nedbetalingstid - statusQuo.aarBodd);
+  const gjenstaendeAar = Math.max(0, statusQuo.nedbetalingstid - aarBodd);
   const monthlyLoanCost = calculateMonthlyPayment(
     restgjeld,
     statusQuo.rente,
@@ -264,6 +333,8 @@ function calculateStatusQuo(statusQuo) {
   const monthlyTotal = monthlyLoanCost + operating.monthlyTotal;
   const egenkapital = statusQuo.verdiIDag - restgjeld;
   const nettoFraSalg = statusQuo.verdiIDag - restgjeld - statusQuo.salgskostnader;
+  const dokumentavgift = calculateDokumentavgift(statusQuo, statusQuo.kjopspris);
+  const totalKjopskostnad = statusQuo.kjopspris + dokumentavgift;
 
   return {
     laanVedKjop,
@@ -278,6 +349,10 @@ function calculateStatusQuo(statusQuo) {
     nettoFraSalg,
     estimertVerdi,
     verdistigning,
+    dokumentavgift,
+    totalKjopskostnad,
+    aarBodd,
+    overtakelsesdato: statusQuo.overtakelsesdato,
   };
 }
 
@@ -294,7 +369,7 @@ function calculateNyBolig(nyBolig, nettoFraSalg) {
   const monthlyTotal = monthlyLoanCost + operating.monthlyTotal;
   const utleie = calculateUtleie(nyBolig);
   const monthlyNetCost = monthlyTotal - utleie.nettoInntektMnd;
-  const dokumentavgift = calculateDokumentavgift(nyBolig);
+  const dokumentavgift = calculateDokumentavgift(nyBolig, nyBolig.boligpris);
   const engangskostnader = nyBolig.flyttekostnader + dokumentavgift;
   const kontanterTilDokOgFlytt = engangskostnader;
   const kontanterFraLomme =
@@ -460,15 +535,26 @@ function HousingCard({ title, item, fields, totals, onFieldChange, children }) {
     <article className="card card-highlight">
       <h2>{title}</h2>
       <div className="grid">
-        {fields.map((field) => (
-          <CostInput
-            key={field.key}
-            label={field.label}
-            value={item[field.key]}
-            onChange={(value) => onFieldChange(field.key, value)}
-            step={field.step ?? 1000}
-          />
-        ))}
+        {fields.map((field) =>
+          field.type === "date" ? (
+            <label key={field.key} className="field">
+              <span>{field.label}</span>
+              <input
+                type="date"
+                value={item[field.key] ?? ""}
+                onChange={(event) => onFieldChange(field.key, event.target.value)}
+              />
+            </label>
+          ) : (
+            <CostInput
+              key={field.key}
+              label={field.label}
+              value={item[field.key]}
+              onChange={(value) => onFieldChange(field.key, value)}
+              step={field.step ?? 1000}
+            />
+          ),
+        )}
       </div>
       {children}
       <div className="result">{totals}</div>
@@ -580,7 +666,7 @@ function FormCard({ item, onUpdate, onRemove, totals, canRemove }) {
 }
 
 const statusQuoFields = [
-  { key: "aarBodd", label: "År bodd i boligen", step: 1 },
+  { key: "overtakelsesdato", label: "Overtakelsesdato", type: "date" },
   { key: "kjopspris", label: "Kjøpspris (kr)" },
   { key: "egenkapitalVedKjop", label: "Egenkapital ved kjøp (kr)" },
   { key: "boarealKvm", label: "Boareal (kvm)", step: 1 },
@@ -616,6 +702,8 @@ export default function App() {
   const [nyBolig, setNyBolig] = useState(defaultNyBolig);
   const [nextId, setNextId] = useState(3);
   const [finnUrl, setFinnUrl] = useState("");
+  const [finnUrlNaa, setFinnUrlNaa] = useState("");
+  const [finnUrlNy, setFinnUrlNy] = useState("");
   const [targetFormId, setTargetFormId] = useState(defaultForms[0].id);
   const [importStatus, setImportStatus] = useState("");
   const [isImporting, setIsImporting] = useState(false);
@@ -631,7 +719,14 @@ export default function App() {
       setActiveTab(shared.activeTab);
     }
     if (shared.statusQuo) {
-      setStatusQuo(shared.statusQuo);
+      const sq = { ...shared.statusQuo };
+      if (sq.aarBodd != null && !sq.overtakelsesdato) {
+        const approx = new Date();
+        approx.setFullYear(approx.getFullYear() - Math.round(sq.aarBodd));
+        sq.overtakelsesdato = approx.toISOString().slice(0, 10);
+        delete sq.aarBodd;
+      }
+      setStatusQuo(sq);
     }
     if (shared.nyBolig) {
       setNyBolig(shared.nyBolig);
@@ -733,49 +828,100 @@ export default function App() {
     setImportStatus("Henter annonse...");
 
     try {
-      const response = await fetch("/api/finn/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: finnUrl.trim() }),
-      });
+      const data = await fetchFinnListing(finnUrl);
+      setForms((current) =>
+        current.map((form) => {
+          if (form.id !== effectiveTargetFormId) {
+            return form;
+          }
+          return applyListingImport(form, data);
+        }),
+      );
+      setImportStatus(
+        data.funnet
+          ? `Importert fra ${describeImportSource(data)}. Sjekk og juster tallene.`
+          : "Fant ingen tall automatisk. Prøv en annen annonse eller fyll inn manuelt.",
+      );
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : "Noe gikk galt ved import.");
+    } finally {
+      setIsImporting(false);
+    }
+  };
 
-      const data = await response.json();
-      if (!response.ok) {
-        setImportStatus(data?.error ?? "Kunne ikke hente data fra FINN.");
-        return;
-      }
+  const importFlyttFromFinn = async (target) => {
+    const url =
+      target === "naa" ? finnUrlNaa.trim() : target === "ny" ? finnUrlNy.trim() : "";
+    if (!url) {
+      setImportStatus("Legg inn FINN-url for boligen du vil hente.");
+      return;
+    }
 
-      if (activeTab === "flytt") {
-        setNyBolig((current) => applyListingImport(current, data));
+    const label = target === "naa" ? "Nåværende bolig" : "Ny bolig";
+    setIsImporting(true);
+    setImportStatus(`Henter ${label.toLowerCase()}...`);
+
+    try {
+      const data = await fetchFinnListing(url);
+      if (target === "naa") {
+        setStatusQuo((current) => applyListingToStatusQuo(current, data));
       } else {
-        setForms((current) =>
-          current.map((form) => {
-            if (form.id !== effectiveTargetFormId) {
-              return form;
-            }
-            return applyListingImport(form, data);
-          }),
+        setNyBolig((current) => applyListingImport(current, data));
+      }
+      setImportStatus(
+        data.funnet
+          ? `${label}: importert fra ${describeImportSource(data)}.`
+          : `${label}: fant ingen tall automatisk.`,
+      );
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : "Noe gikk galt ved import.");
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const importBothFlyttFromFinn = async () => {
+    const hasNaa = Boolean(finnUrlNaa.trim());
+    const hasNy = Boolean(finnUrlNy.trim());
+
+    if (!hasNaa && !hasNy) {
+      setImportStatus("Legg inn minst én FINN-url (gjerne begge).");
+      return;
+    }
+
+    setIsImporting(true);
+    setImportStatus("Henter annonser...");
+
+    try {
+      const messages = [];
+      let updatedStatusQuo = statusQuo;
+      let updatedNyBolig = nyBolig;
+
+      if (hasNaa) {
+        const dataNaa = await fetchFinnListing(finnUrlNaa);
+        updatedStatusQuo = applyListingToStatusQuo(updatedStatusQuo, dataNaa);
+        messages.push(
+          dataNaa.funnet
+            ? `Nåværende bolig: ${describeImportSource(dataNaa)}`
+            : "Nåværende bolig: ingen gjenkjente tall",
         );
       }
 
-      const salgsoppgaveKilde =
-        data.salgsoppgaveType === "pdf"
-          ? "salgsoppgave (PDF)"
-          : data.salgsoppgaveType === "html"
-            ? "salgsoppgave (nettside)"
-            : "salgsoppgave";
-      const kilde = data.salgsoppgaveFunnet
-        ? `${salgsoppgaveKilde} og FINN-side`
-        : data.funnet
-          ? "FINN-side"
-          : "ingen gjenkjente tall";
-      setImportStatus(
-        data.funnet
-          ? `Importert fra ${kilde}. Sjekk og juster tallene.`
-          : "Fant ingen tall automatisk. Prøv en annen annonse eller fyll inn manuelt.",
-      );
-    } catch {
-      setImportStatus("Noe gikk galt ved import.");
+      if (hasNy) {
+        const dataNy = await fetchFinnListing(finnUrlNy);
+        updatedNyBolig = applyListingImport(updatedNyBolig, dataNy);
+        messages.push(
+          dataNy.funnet
+            ? `Ny bolig: ${describeImportSource(dataNy)}`
+            : "Ny bolig: ingen gjenkjente tall",
+        );
+      }
+
+      setStatusQuo(updatedStatusQuo);
+      setNyBolig(updatedNyBolig);
+      setImportStatus(`${messages.join(" · ")}. Sjekk og juster tallene.`);
+    } catch (error) {
+      setImportStatus(error instanceof Error ? error.message : "Noe gikk galt ved import.");
     } finally {
       setIsImporting(false);
     }
@@ -831,21 +977,70 @@ export default function App() {
         <h2>Importer fra FINN</h2>
         <p>
           {activeTab === "flytt"
-            ? "Henter tall fra FINN og salgsoppgave (PDF eller lenket nettside) inn i ny bolig."
+            ? "Lim inn FINN-lenke for hver bolig. Pris fra annonsen fylles inn som verdi i dag (nåværende) og kjøpesum (ny)."
             : "Henter tall fra FINN og salgsoppgave (PDF eller lenket nettside) inn i valgt boform."}
         </p>
-        <div className="importer-controls">
-          <label className="field">
-            <span>FINN-url</span>
-            <input
-              type="url"
-              value={finnUrl}
-              onChange={(event) => setFinnUrl(event.target.value)}
-              placeholder="https://www.finn.no/realestate/homes/ad.html?finnkode=..."
-            />
-          </label>
 
-          {activeTab === "boformer" ? (
+        {activeTab === "flytt" ? (
+          <>
+            <div className="importer-dual">
+              <label className="field">
+                <span>FINN-url – nåværende bolig</span>
+                <input
+                  type="url"
+                  value={finnUrlNaa}
+                  onChange={(event) => setFinnUrlNaa(event.target.value)}
+                  placeholder="https://www.finn.no/realestate/homes/ad.html?finnkode=..."
+                />
+              </label>
+              <label className="field">
+                <span>FINN-url – ny bolig</span>
+                <input
+                  type="url"
+                  value={finnUrlNy}
+                  onChange={(event) => setFinnUrlNy(event.target.value)}
+                  placeholder="https://www.finn.no/realestate/homes/ad.html?finnkode=..."
+                />
+              </label>
+            </div>
+            <div className="importer-actions">
+              <button
+                type="button"
+                className="button button-primary"
+                onClick={importBothFlyttFromFinn}
+                disabled={isImporting}
+              >
+                {isImporting ? "Henter..." : "Hent begge boliger"}
+              </button>
+              <button
+                type="button"
+                className="button"
+                onClick={() => importFlyttFromFinn("naa")}
+                disabled={isImporting}
+              >
+                Hent nåværende
+              </button>
+              <button
+                type="button"
+                className="button"
+                onClick={() => importFlyttFromFinn("ny")}
+                disabled={isImporting}
+              >
+                Hent ny bolig
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="importer-controls">
+            <label className="field">
+              <span>FINN-url</span>
+              <input
+                type="url"
+                value={finnUrl}
+                onChange={(event) => setFinnUrl(event.target.value)}
+                placeholder="https://www.finn.no/realestate/homes/ad.html?finnkode=..."
+              />
+            </label>
             <label className="field">
               <span>Fyll inn i boform</span>
               <select
@@ -859,17 +1054,16 @@ export default function App() {
                 ))}
               </select>
             </label>
-          ) : null}
-
-          <button
-            type="button"
-            className="button"
-            onClick={importFromFinn}
-            disabled={isImporting}
-          >
-            {isImporting ? "Henter..." : "Hent data"}
-          </button>
-        </div>
+            <button
+              type="button"
+              className="button"
+              onClick={importFromFinn}
+              disabled={isImporting}
+            >
+              {isImporting ? "Henter..." : "Hent data"}
+            </button>
+          </div>
+        )}
         {importStatus ? <p className="import-status">{importStatus}</p> : null}
       </section>
 
@@ -884,6 +1078,41 @@ export default function App() {
                 setStatusQuo((current) => ({ ...current, [field]: value }))
               }
               children={
+                <>
+                <div className="utleie-panel">
+                  <label className="checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={statusQuo.dokumentavgiftAktivert}
+                      onChange={(event) =>
+                        setStatusQuo((current) => ({
+                          ...current,
+                          dokumentavgiftAktivert: event.target.checked,
+                        }))
+                      }
+                    />
+                    <span>Inkluder dokumentavgift ved kjøp (skjøte)</span>
+                  </label>
+                  {statusQuo.dokumentavgiftAktivert ? (
+                    <div className="grid">
+                      <CostInput
+                        label="Dokumentavgift (%)"
+                        value={statusQuo.dokumentavgiftProsent}
+                        onChange={(value) =>
+                          setStatusQuo((current) => ({
+                            ...current,
+                            dokumentavgiftProsent: value,
+                          }))
+                        }
+                        step={0.1}
+                      />
+                    </div>
+                  ) : null}
+                  <p className="hint">
+                    Beregnes av kjøpspris ({asCurrency(statusQuo.kjopspris)}). Gjelder
+                    engangskostnad da du kjøpte nåværende bolig.
+                  </p>
+                </div>
                 <div className="verdi-panel">
                   <label className="field">
                     <span>Kommune</span>
@@ -906,16 +1135,37 @@ export default function App() {
                     </select>
                   </label>
                   <p className="hint">
-                    Estimatet er forenklet basert på kjøpspris, år eid, kommune-snitt og kvm.
-                    Bruk «Bruk estimert verdi» eller juster manuelt.
+                    Estimatet er forenklet basert på kjøpspris, tid siden overtakelse, kommune-snitt
+                    og kvm. Bruk «Bruk estimert verdi» eller juster manuelt.
                   </p>
                   <button type="button" className="button" onClick={applyEstimatedValue}>
                     Bruk estimert verdi i dag
                   </button>
                 </div>
+                </>
               }
               totals={
                 <>
+                  {statusQuo.dokumentavgiftAktivert ? (
+                    <>
+                      <p>
+                        Dokumentavgift ved kjøp ({statusQuo.dokumentavgiftProsent} %):{" "}
+                        <strong>{asCurrency(statusQuoTotals.dokumentavgift)}</strong>
+                      </p>
+                      <p>
+                        Total kjøpskostnad (pris + dok.avg.):{" "}
+                        <strong>{asCurrency(statusQuoTotals.totalKjopskostnad)}</strong>
+                      </p>
+                    </>
+                  ) : null}
+                  <p>
+                    Tid i boligen:{" "}
+                    <strong>{statusQuoTotals.aarBodd.toFixed(1)} år</strong>
+                    <span className="hint">
+                      {" "}
+                      (siden {formatDateNb(statusQuoTotals.overtakelsesdato)})
+                    </span>
+                  </p>
                   <p>
                     Estimert verdi i dag:{" "}
                     <strong>{asCurrency(statusQuoTotals.estimertVerdi)}</strong>
