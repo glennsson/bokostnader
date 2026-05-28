@@ -281,6 +281,11 @@ async function fetchFinnListing(url) {
 }
 
 function describeImportSource(data) {
+  if (data.hentetFra) {
+    const utdatert = data.utdatert ? " (utgått annonse)" : "";
+    return `${data.hentetFra}${utdatert}`;
+  }
+
   const salgsoppgaveKilde =
     data.salgsoppgaveType === "pdf"
       ? "salgsoppgave (PDF)"
@@ -291,7 +296,7 @@ function describeImportSource(data) {
     return `${salgsoppgaveKilde} og FINN-side`;
   }
   if (data.funnet) {
-    return "FINN-side";
+    return data.utdatert ? "utgått FINN-side" : "FINN-side";
   }
   return "ingen gjenkjente tall";
 }
@@ -977,8 +982,8 @@ export default function App() {
         <h2>Importer fra FINN</h2>
         <p>
           {activeTab === "flytt"
-            ? "Lim inn FINN-lenke for hver bolig. Pris fra annonsen fylles inn som verdi i dag (nåværende) og kjøpesum (ny)."
-            : "Henter tall fra FINN og salgsoppgave (PDF eller lenket nettside) inn i valgt boform."}
+            ? "Lim inn FINN-lenke for hver bolig – også utgåtte annonser. Vi henter fra lagret annonsedata, side og ev. arkivert kopi."
+            : "Henter tall fra FINN og salgsoppgave – også utgåtte annonser (PDF, nettside eller arkiv)."}
         </p>
 
         {activeTab === "flytt" ? (
