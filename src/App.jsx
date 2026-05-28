@@ -1,5 +1,21 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import AuthPanel from "./AuthPanel";
+import {
+  deleteCloudState,
+  getSessionUser,
+  loadCloudState,
+  saveCloudState,
+  subscribeToAuth,
+} from "./cloudStorage";
 import { buildShareUrl, readShareFromUrl } from "./share";
+import { extractStateFromPayload } from "./savedState";
+import { isCloudEnabled } from "./supabaseClient";
+import {
+  buildSavePayload,
+  clearSavedState,
+  loadSavedState,
+  saveSavedState,
+} from "./storage";
 import {
   estimateBoligverdi,
   getKommuneRate,
@@ -13,6 +29,7 @@ const defaultForms = [
   {
     id: 1,
     name: "Enebolig",
+    adresse: "",
     boligpris: 5500000,
     egenkapital: 1100000,
     rente: 5.2,
@@ -25,6 +42,7 @@ const defaultForms = [
   {
     id: 2,
     name: "Rekkehus",
+    adresse: "",
     boligpris: 4300000,
     egenkapital: 860000,
     rente: 5.2,
@@ -38,6 +56,7 @@ const defaultForms = [
 
 const emptyForm = {
   name: "",
+  adresse: "",
   boligpris: 0,
   egenkapital: 0,
   rente: 0,
@@ -165,10 +184,12 @@ function calculateCosts(form) {
 
 const defaultStatusQuo = {
   name: "Nåværende bolig",
+  adresse: "",
   overtakelsesdato: "2021-05-28",
   kjopspris: 4200000,
   egenkapitalVedKjop: 840000,
   verdiIDag: 5200000,
+  verdiModus: "manuell",
   kommune: "oslo",
   boarealKvm: 85,
   verdistigningAarlig: 5.5,
@@ -186,6 +207,7 @@ const defaultStatusQuo = {
 
 const defaultNyBolig = {
   name: "Ny bolig",
+  adresse: "",
   boligpris: 5800000,
   kontanterEgenkapital: 200000,
   rente: 5.2,
@@ -317,7 +339,9 @@ function calculateStatusQuo(statusQuo) {
     verdistigningAarlig: statusQuo.verdistigningAarlig,
     boarealKvm: statusQuo.boarealKvm,
   });
-  const verdistigning = calculateVerdistigning(statusQuo.kjopspris, estimertVerdi);
+  const verdiModus = statusQuo.verdiModus === "estimert" ? "estimert" : "manuell";
+  const effectiveVerdi = verdiModus === "estimert" ? estimertVerdi : statusQuo.verdiIDag;
+  const verdistigning = calculateVerdistigning(statusQuo.kjopspris, effectiveVerdi);
 
   const laanVedKjop = Math.max(0, statusQuo.kjopspris - statusQuo.egenkapitalVedKjop);
   const beregnetRestgjeld = remainingLoanBalance(
@@ -336,8 +360,8 @@ function calculateStatusQuo(statusQuo) {
   );
   const operating = calculateOperatingCosts(statusQuo);
   const monthlyTotal = monthlyLoanCost + operating.monthlyTotal;
-  const egenkapital = statusQuo.verdiIDag - restgjeld;
-  const nettoFraSalg = statusQuo.verdiIDag - restgjeld - statusQuo.salgskostnader;
+  const egenkapital = effectiveVerdi - restgjeld;
+  const nettoFraSalg = effectiveVerdi - restgjeld - statusQuo.salgskostnader;
   const dokumentavgift = calculateDokumentavgift(statusQuo, statusQuo.kjopspris);
   const totalKjopskostnad = statusQuo.kjopspris + dokumentavgift;
 
@@ -353,6 +377,8 @@ function calculateStatusQuo(statusQuo) {
     egenkapital,
     nettoFraSalg,
     estimertVerdi,
+    effectiveVerdi,
+    verdiModus,
     verdistigning,
     dokumentavgift,
     totalKjopskostnad,
@@ -535,10 +561,42 @@ function CostInput({ label, value, onChange, step = 1000 }) {
   );
 }
 
+function AddressInput({ value, onChange }) {
+  return (
+    <label className="field address-field">
+      <span>Adresse</span>
+      <input
+        type="text"
+        value={value ?? ""}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="f.eks. Storgata 1, 1400 Ski"
+      />
+    </label>
+  );
+}
+
+function formatSavedTime(isoString) {
+  if (!isoString) {
+    return "";
+  }
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("nb-NO", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date);
+}
+
 function HousingCard({ title, item, fields, totals, onFieldChange, children }) {
   return (
     <article className="card card-highlight">
       <h2>{title}</h2>
+      <AddressInput
+        value={item.adresse}
+        onChange={(value) => onFieldChange("adresse", value)}
+      />
       <div className="grid">
         {fields.map((field) =>
           field.type === "date" ? (
@@ -603,6 +661,11 @@ function FormCard({ item, onUpdate, onRemove, totals, canRemove }) {
           Fjern
         </button>
       </div>
+
+      <AddressInput
+        value={item.adresse}
+        onChange={(value) => updateField("adresse", value)}
+      />
 
       <div className="grid">
         <CostInput
@@ -713,37 +776,156 @@ export default function App() {
   const [importStatus, setImportStatus] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const [shareStatus, setShareStatus] = useState("");
+  const [saveStatus, setSaveStatus] = useState("");
+  const [lastSavedAt, setLastSavedAt] = useState(null);
+  const [hydrated, setHydrated] = useState(false);
+  const [authUser, setAuthUser] = useState(null);
 
-  useEffect(() => {
-    const shared = readShareFromUrl();
-    if (!shared) {
+  const payloadDefaults = useMemo(
+    () => ({ defaultStatusQuo, defaultNyBolig, emptyForm }),
+    [],
+  );
+
+  const applySaved = useCallback(
+    (saved, statusMessage) => {
+      const state = extractStateFromPayload(saved, payloadDefaults);
+      if (!state) {
+        return;
+      }
+
+      if (state.activeTab) {
+        setActiveTab(state.activeTab);
+      }
+      if (state.statusQuo) {
+        setStatusQuo(state.statusQuo);
+      }
+      if (state.nyBolig) {
+        setNyBolig(state.nyBolig);
+      }
+      if (state.forms) {
+        setForms(state.forms);
+      }
+      if (state.nextId) {
+        setNextId(state.nextId);
+      }
+      if (state.savedAt) {
+        setLastSavedAt(state.savedAt);
+      }
+      if (statusMessage) {
+        setSaveStatus(statusMessage);
+      }
+    },
+    [payloadDefaults],
+  );
+
+  const persistPayload = useCallback(async (payload, statusMessage) => {
+    saveSavedState(payload);
+    setLastSavedAt(payload.savedAt);
+
+    if (authUser && isCloudEnabled) {
+      try {
+        await saveCloudState(payload);
+        setSaveStatus(
+          statusMessage
+            ? `${statusMessage} Synkronisert med skyen.`
+            : "Synkronisert med skyen.",
+        );
+      } catch {
+        setSaveStatus(
+          statusMessage
+            ? `${statusMessage} Sky-synk feilet – lagret lokalt.`
+            : "Sky-synk feilet – lagret lokalt i nettleseren.",
+        );
+      }
       return;
     }
 
-    if (shared.activeTab === "flytt" || shared.activeTab === "boformer") {
-      setActiveTab(shared.activeTab);
+    if (statusMessage) {
+      setSaveStatus(statusMessage);
     }
-    if (shared.statusQuo) {
-      const sq = { ...shared.statusQuo };
-      if (sq.aarBodd != null && !sq.overtakelsesdato) {
-        const approx = new Date();
-        approx.setFullYear(approx.getFullYear() - Math.round(sq.aarBodd));
-        sq.overtakelsesdato = approx.toISOString().slice(0, 10);
-        delete sq.aarBodd;
+  }, [authUser]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function init() {
+      const shared = readShareFromUrl();
+      if (shared) {
+        applySaved(shared, null);
+        if (!cancelled) {
+          setShareStatus("Data lastet fra delt lenke.");
+          setHydrated(true);
+        }
+        return;
       }
-      setStatusQuo(sq);
+
+      if (isCloudEnabled) {
+        try {
+          const user = await getSessionUser();
+          if (!cancelled) {
+            setAuthUser(user);
+          }
+
+          if (user) {
+            const cloud = await loadCloudState();
+            if (!cancelled && cloud) {
+              applySaved(cloud, "Lastet fra skyen.");
+              setHydrated(true);
+              return;
+            }
+          }
+        } catch {
+          if (!cancelled) {
+            setSaveStatus("Kunne ikke laste fra skyen – prøver lokal kopi.");
+          }
+        }
+      }
+
+      const local = loadSavedState();
+      if (!cancelled && local) {
+        applySaved(local, "Lastet lagret kalkulator fra denne nettleseren.");
+      }
+      if (!cancelled) {
+        setHydrated(true);
+      }
     }
-    if (shared.nyBolig) {
-      setNyBolig(shared.nyBolig);
-    }
-    if (Array.isArray(shared.forms) && shared.forms.length > 0) {
-      setForms(shared.forms);
-    }
-    if (shared.nextId) {
-      setNextId(shared.nextId);
-    }
-    setShareStatus("Data lastet fra delt lenke.");
-  }, []);
+
+    init();
+
+    const unsubscribe = subscribeToAuth(async (event, user) => {
+      setAuthUser(user);
+
+      if (event === "SIGNED_IN" && user) {
+        try {
+          const cloud = await loadCloudState();
+          if (cloud) {
+            applySaved(cloud, "Innlogget – data hentet fra skyen.");
+            return;
+          }
+
+          const local = loadSavedState();
+          if (local) {
+            applySaved(local, null);
+            await saveCloudState(local);
+            setSaveStatus("Innlogget – lokal kalkulator er lastet opp til skyen.");
+          } else {
+            setSaveStatus("Innlogget – ingen lagret data ennå. Endringer lagres automatisk.");
+          }
+        } catch {
+          setSaveStatus("Innlogget, men kunne ikke synkronisere med skyen.");
+        }
+      }
+
+      if (event === "SIGNED_OUT") {
+        setSaveStatus("Utlogget. Data lagres lokalt i nettleseren.");
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [applySaved]);
 
   const statusQuoTotals = useMemo(() => calculateStatusQuo(statusQuo), [statusQuo]);
   const nyBoligTotals = useMemo(
@@ -761,12 +943,19 @@ export default function App() {
   const moveDeltaMonthly = nyBoligCostMonthly - statusQuoTotals.monthlyTotal;
   const moveDeltaYearly = nyBoligCostYearly - statusQuoTotals.yearlyTotal;
 
-  const applyEstimatedValue = () => {
-    setStatusQuo((current) => ({
-      ...current,
-      verdiIDag: statusQuoTotals.estimertVerdi,
-    }));
-    setShareStatus("Estimert verdi er lagt inn som «Verdi i dag».");
+  const setVerdiModus = (modus) => {
+    setStatusQuo((current) => {
+      const next = { ...current, verdiModus: modus };
+      if (modus === "manuell" && current.verdiModus === "estimert") {
+        next.verdiIDag = statusQuoTotals.estimertVerdi;
+      }
+      return next;
+    });
+    setShareStatus(
+      modus === "estimert"
+        ? "Beregninger bruker estimert prisstigning."
+        : "Beregninger bruker manuell verdi i dag.",
+    );
   };
 
   const copyShareLink = async () => {
@@ -791,10 +980,82 @@ export default function App() {
       forms.map((form) => ({
         id: form.id,
         name: form.name,
+        adresse: form.adresse,
         totals: calculateCosts(form),
       })),
     [forms],
   );
+
+  const saveNow = () => {
+    const payload = buildSavePayload({
+      activeTab,
+      statusQuo,
+      nyBolig,
+      forms,
+      nextId,
+      statusQuoTotals,
+      nyBoligMonthly: nyBoligCostMonthly,
+      nyBoligYearly: nyBoligCostYearly,
+      nyBoligTotals,
+      formResults: results,
+    });
+    void persistPayload(payload, "Kalkulator lagret med adresser og resultater.");
+  };
+
+  const resetSaved = async () => {
+    clearSavedState();
+    setLastSavedAt(null);
+
+    if (authUser && isCloudEnabled) {
+      try {
+        await deleteCloudState();
+        setSaveStatus("Lagret data er slettet fra nettleseren og skyen.");
+      } catch {
+        setSaveStatus("Lokal data slettet. Kunne ikke slette fra skyen.");
+      }
+      return;
+    }
+
+    setSaveStatus("Lagret data er slettet fra nettleseren.");
+  };
+
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+
+    const payload = buildSavePayload({
+      activeTab,
+      statusQuo,
+      nyBolig,
+      forms,
+      nextId,
+      statusQuoTotals,
+      nyBoligMonthly: nyBoligCostMonthly,
+      nyBoligYearly: nyBoligCostYearly,
+      nyBoligTotals,
+      formResults: results,
+    });
+
+    const timer = setTimeout(() => {
+      void persistPayload(payload, null);
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [
+    hydrated,
+    activeTab,
+    statusQuo,
+    nyBolig,
+    forms,
+    nextId,
+    statusQuoTotals,
+    nyBoligCostMonthly,
+    nyBoligCostYearly,
+    nyBoligTotals,
+    results,
+    persistPayload,
+  ]);
 
   const updateForm = (id, field, value) => {
     setForms((current) =>
@@ -954,12 +1215,71 @@ export default function App() {
         </p>
       </header>
 
+      <AuthPanel user={authUser} onAuthChange={setAuthUser} />
+
       <div className="share-row">
         <button type="button" className="button button-primary" onClick={copyShareLink}>
           Kopier delbar lenke
         </button>
+        <button type="button" className="button" onClick={saveNow}>
+          Lagre nå
+        </button>
+        <button type="button" className="button" onClick={resetSaved}>
+          Tøm lagring
+        </button>
         {shareStatus ? <p className="share-status">{shareStatus}</p> : null}
+        {saveStatus ? <p className="share-status">{saveStatus}</p> : null}
+        {lastSavedAt ? (
+          <p className="share-status">
+            Sist lagret{authUser ? " (sky + lokal)" : ""}: {formatSavedTime(lastSavedAt)}
+          </p>
+        ) : null}
       </div>
+
+      <section className="saved-overview">
+        <h2>Boliger og lagrede resultater</h2>
+        <div className="saved-grid">
+          <article className="saved-card">
+            <h3>{statusQuo.adresse?.trim() || statusQuo.name}</h3>
+            <p className="saved-label">Nåværende bolig</p>
+            <p>
+              Månedlig: <strong>{asCurrency(statusQuoTotals.monthlyTotal)}</strong>
+            </p>
+            <p>
+              Årlig: <strong>{asCurrency(statusQuoTotals.yearlyTotal)}</strong>
+            </p>
+            <p>
+              Netto fra salg: <strong>{asCurrency(statusQuoTotals.nettoFraSalg)}</strong>
+            </p>
+          </article>
+          <article className="saved-card">
+            <h3>{nyBolig.adresse?.trim() || nyBolig.name}</h3>
+            <p className="saved-label">Ny bolig</p>
+            <p>
+              Månedlig: <strong>{asCurrency(nyBoligCostMonthly)}</strong>
+              {nyBolig.utleieAktivert ? <span className="hint"> (etter utleie)</span> : null}
+            </p>
+            <p>
+              Årlig: <strong>{asCurrency(nyBoligCostYearly)}</strong>
+            </p>
+            <p>
+              Lånebehov: <strong>{asCurrency(nyBoligTotals.laan)}</strong>
+            </p>
+          </article>
+          {results.map((result) => (
+            <article key={result.id} className="saved-card">
+              <h3>{result.adresse?.trim() || result.name}</h3>
+              <p className="saved-label">{result.name}</p>
+              <p>
+                Månedlig: <strong>{asCurrency(result.totals.monthlyTotal)}</strong>
+              </p>
+              <p>
+                Årlig: <strong>{asCurrency(result.totals.yearlyTotal)}</strong>
+              </p>
+            </article>
+          ))}
+        </div>
+      </section>
 
       <nav className="tabs" aria-label="Visning">
         <button
@@ -1078,7 +1398,15 @@ export default function App() {
             <HousingCard
               title={statusQuo.name}
               item={statusQuo}
-              fields={statusQuoFields}
+              fields={statusQuoFields.filter((field) => {
+                if (field.key === "verdistigningAarlig") {
+                  return statusQuo.verdiModus === "estimert";
+                }
+                if (field.key === "verdiIDag") {
+                  return statusQuo.verdiModus === "manuell";
+                }
+                return true;
+              })}
               onFieldChange={(field, value) =>
                 setStatusQuo((current) => ({ ...current, [field]: value }))
               }
@@ -1119,33 +1447,60 @@ export default function App() {
                   </p>
                 </div>
                 <div className="verdi-panel">
-                  <label className="field">
-                    <span>Kommune</span>
-                    <select
-                      value={statusQuo.kommune}
-                      onChange={(event) => {
-                        const kommune = event.target.value;
-                        setStatusQuo((current) => ({
-                          ...current,
-                          kommune,
-                          verdistigningAarlig: getKommuneRate(kommune),
-                        }));
-                      }}
-                    >
-                      {KOMMUNER.map((item) => (
-                        <option key={item.key} value={item.key}>
-                          {item.label} (ca. {item.verdistigningAarlig} %/år)
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <p className="hint">
-                    Estimatet er forenklet basert på kjøpspris, tid siden overtakelse, kommune-snitt
-                    og kvm. Bruk «Bruk estimert verdi» eller juster manuelt.
-                  </p>
-                  <button type="button" className="button" onClick={applyEstimatedValue}>
-                    Bruk estimert verdi i dag
-                  </button>
+                  <fieldset className="verdi-modus">
+                    <legend>Verdi i dag – utgangspunkt for beregninger</legend>
+                    <label className="radio-field">
+                      <input
+                        type="radio"
+                        name="verdiModus"
+                        checked={statusQuo.verdiModus === "estimert"}
+                        onChange={() => setVerdiModus("estimert")}
+                      />
+                      <span>Estimert prisstigning (kommune + %/år)</span>
+                    </label>
+                    <label className="radio-field">
+                      <input
+                        type="radio"
+                        name="verdiModus"
+                        checked={statusQuo.verdiModus !== "estimert"}
+                        onChange={() => setVerdiModus("manuell")}
+                      />
+                      <span>Manuell verdi i dag</span>
+                    </label>
+                  </fieldset>
+                  {statusQuo.verdiModus === "estimert" ? (
+                    <>
+                      <label className="field">
+                        <span>Kommune</span>
+                        <select
+                          value={statusQuo.kommune}
+                          onChange={(event) => {
+                            const kommune = event.target.value;
+                            setStatusQuo((current) => ({
+                              ...current,
+                              kommune,
+                              verdistigningAarlig: getKommuneRate(kommune),
+                            }));
+                          }}
+                        >
+                          {KOMMUNER.map((item) => (
+                            <option key={item.key} value={item.key}>
+                              {item.label} (ca. {item.verdistigningAarlig} %/år)
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <p className="hint">
+                        Estimatet er forenklet: kjøpspris, tid siden overtakelse, valgt
+                        prisstigning og kvm. Egenkapital og netto fra salg beregnes fra dette.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="hint">
+                      Fyll inn «Verdi i dag – manuell» over. Estimert verdi vises som sammenligning
+                      under resultatene.
+                    </p>
+                  )}
                 </div>
                 </>
               }
@@ -1172,13 +1527,22 @@ export default function App() {
                     </span>
                   </p>
                   <p>
-                    Estimert verdi i dag:{" "}
-                    <strong>{asCurrency(statusQuoTotals.estimertVerdi)}</strong>
+                    {statusQuoTotals.verdiModus === "estimert"
+                      ? "Verdi i dag (estimert prisstigning)"
+                      : "Verdi i dag (manuell)"}
+                    : <strong>{asCurrency(statusQuoTotals.effectiveVerdi)}</strong>
                     <span className="hint">
                       {" "}
-                      (+{statusQuoTotals.verdistigning.prosent.toFixed(1)} % siden kjøp)
+                      ({statusQuoTotals.verdistigning.prosent >= 0 ? "+" : ""}
+                      {statusQuoTotals.verdistigning.prosent.toFixed(1)} % siden kjøp)
                     </span>
                   </p>
+                  {statusQuoTotals.verdiModus === "manuell" ? (
+                    <p className="hint">
+                      Estimert alternativ ({statusQuo.verdistigningAarlig} %/år):{" "}
+                      <strong>{asCurrency(statusQuoTotals.estimertVerdi)}</strong>
+                    </p>
+                  ) : null}
                   <p>
                     Restgjeld: <strong>{asCurrency(statusQuoTotals.restgjeld)}</strong>
                     {statusQuo.restgjeld === 0 ? (

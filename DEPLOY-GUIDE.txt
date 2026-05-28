@@ -26,6 +26,33 @@ Ekstra funksjoner:
   - FINN-import (lim inn annonse-URL)
   - Eksport CSV/PDF (fanen «flere boformer»)
   - Kopier delbar lenke (sender med alle tall i URL-en)
+  - Adresser + lagring lokalt (nettleser) og valgfritt i skyen (Supabase)
+  - Innlogging med e-postlenke – synk på tvers av PC/mobil
+
+
+--------------------------------------------------------------------------------
+1b. SKY-LAGRING (SUPABASE) – VALGFRITT
+--------------------------------------------------------------------------------
+
+Uten oppsett lagres data kun i nettleseren (localStorage).
+Med Supabase lagres samme JSON også i skyen når du er innlogget.
+
+Steg-for-steg: se filen  supabase/SETUP.md  i prosjektmappen.
+
+Kort versjon:
+  1. Opprett gratis prosjekt på https://supabase.com
+  2. Kjør SQL fra  supabase/schema.sql  (SQL Editor)
+  3. Slå på e-post-innlogging, legg inn redirect-URL (localhost + Vercel)
+  4. Kopier .env.example til .env og fyll inn URL + anon key
+  5. Lokalt: npm run dev på nytt
+  6. Vercel: Settings → Environment Variables (samme to variabler), redeploy
+
+Miljøvariabler (begge må starte med VITE_ for at Vite skal eksponere dem):
+  VITE_SUPABASE_URL
+  VITE_SUPABASE_ANON_KEY
+
+Data i skyen: én rad per bruker, tabell kalkulator_data, felt payload (JSON).
+Kun du ser dine data (Row Level Security).
 
 
 --------------------------------------------------------------------------------
