@@ -1,7 +1,13 @@
+import dotenv from "dotenv";
 import cors from "cors";
 import express from "express";
+
+dotenv.config({ path: ".env.local" });
+dotenv.config();
 import { extractFinnListing } from "./lib/finn-extract.js";
 import { extractTilstandsrapport } from "./lib/tilstandsrapport-extract.js";
+import { processTilstandsrapportJob } from "./lib/tilstandsrapport-job-process.js";
+import { isSupabaseAdminConfigured } from "./lib/supabase-admin.js";
 
 const app = express();
 const port = 8787;
@@ -22,6 +28,30 @@ app.post("/api/finn/extract", async (req, res) => {
       error: status === 400 ? message : "Feil ved henting/parsing av annonsen.",
       details: message,
     });
+  }
+});
+
+app.post("/api/tilstandsrapport/process-job", async (req, res) => {
+  const { jobId } = req.body ?? {};
+
+  if (!jobId) {
+    res.status(400).json({ error: "Mangler jobId." });
+    return;
+  }
+
+  if (!isSupabaseAdminConfigured()) {
+    res.status(503).json({
+      error: "Server mangler SUPABASE_SERVICE_ROLE_KEY i .env.local",
+    });
+    return;
+  }
+
+  try {
+    const result = await processTilstandsrapportJob(jobId);
+    res.json({ ok: true, result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: "Parsing feilet.", details: message });
   }
 });
 

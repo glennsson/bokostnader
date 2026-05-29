@@ -15,6 +15,7 @@
     "@supabase/supabase-js": "^2.106.2",
     "cheerio": "^1.1.2",
     "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
     "express": "^4.21.1",
     "pdf-parse": "^1.1.1",
     "react": "^18.3.1",

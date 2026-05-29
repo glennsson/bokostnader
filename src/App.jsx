@@ -12,6 +12,8 @@ import {
   saveToSupabase,
   subscribeToAuth,
 } from "./cloudStorage";
+import { saveScenarioToCloud, upsertPropertyFromFinn } from "./propertyCloud";
+import { getSnapshotMeta } from "./snapshotMeta";
 import { buildShareUrl, readShareFromUrl } from "./share";
 import { extractStateFromPayload } from "./savedState";
 import { isCloudEnabled } from "./supabaseClient";
@@ -23,6 +25,8 @@ import {
 } from "./storage";
 import { exportExcelReport } from "./exportExcel";
 import BarChart, { monthlyCostChartItem } from "./BarChart";
+import CashFlowChart from "./CashFlowChart";
+import { buildLiquidityCashFlow } from "../lib/cashflow-scenario.js";
 import { applyThemeToDocument, getInitialTheme, THEME_STORAGE_KEY } from "./theme";
 import {
   estimateBoligverdi,
@@ -212,8 +216,12 @@ const defaultStatusQuo = {
   dokumentavgiftProsent: 2.5,
   dokumentavgiftAktivert: false,
   tilstandsTiltak: [],
+  maintenancePlan: [],
   engangsTiltakTilstand: 0,
   tilstandsrapportUrl: "",
+  propertyId: null,
+  likviditetAar: 10,
+  likviditetInflasjon: 2.5,
 };
 
 const defaultNyBolig = {
@@ -239,9 +247,30 @@ const defaultNyBolig = {
   utleieEkstraStromVannAar: 6000,
   utleieEkstraAnnetAar: 2000,
   tilstandsTiltak: [],
+  maintenancePlan: [],
   engangsTiltakTilstand: 0,
   tilstandsrapportUrl: "",
+  propertyId: null,
+  likviditetAar: 10,
+  likviditetInflasjon: 2.5,
 };
+
+async function attachPropertyFromFinn(home, finnUrl, finnData, role) {
+  try {
+    const propertyId = await upsertPropertyFromFinn({
+      finnUrl,
+      finnData,
+      adresse: home.adresse,
+      role,
+    });
+    if (propertyId) {
+      return { ...home, propertyId };
+    }
+  } catch {
+    // properties-tabell kan mangle – import fortsetter lokalt
+  }
+  return home;
+}
 
 function calculateUtleie(nyBolig) {
   if (!nyBolig.utleieAktivert || nyBolig.utleieInntektMnd <= 0) {
@@ -1115,8 +1144,21 @@ export default function App() {
           const user = await getSessionUser();
           if (user) {
             const snapshotId = await saveCloudSnapshot(payload);
-            if (snapshotId) {
+            const meta = getSnapshotMeta(payload);
+            const propertyId = nyBolig.propertyId ?? statusQuo.propertyId ?? null;
+            const scenarioId = await saveScenarioToCloud({
+              navn: meta.navn,
+              payload,
+              propertyId,
+            });
+            if (snapshotId && scenarioId) {
+              setSaveStatus(
+                "Lagret i skyen (historikk + scenario + eiendom).",
+              );
+            } else if (snapshotId) {
               setSaveStatus("Lagret i skyen og lagt til i «Mine lagringer».");
+            } else if (scenarioId) {
+              setSaveStatus("Lagret i skyen (scenario).");
             }
           }
         } catch (error) {
@@ -1223,18 +1265,40 @@ export default function App() {
 
     try {
       const data = await fetchFinnListing(finnUrl);
+      let cloudNote = "";
+      let importedForm = null;
+
       setForms((current) =>
         current.map((form) => {
           if (form.id !== effectiveTargetFormId) {
             return form;
           }
-          return applyListingImport(form, data);
+          importedForm = applyListingImport(form, data);
+          return importedForm;
         }),
       );
+
+      if (importedForm) {
+        const withProperty = await attachPropertyFromFinn(
+          importedForm,
+          finnUrl,
+          data,
+          "boform",
+        );
+        if (withProperty.propertyId) {
+          setForms((current) =>
+            current.map((form) =>
+              form.id === effectiveTargetFormId ? withProperty : form,
+            ),
+          );
+          cloudNote = " Eiendom lagret i skyen.";
+        }
+      }
+
       setImportStatus(
         data.funnet
-          ? `Importert fra ${describeImportSource(data)}. Sjekk og juster tallene.`
-          : "Fant ingen tall automatisk. Prøv en annen annonse eller fyll inn manuelt.",
+          ? `Importert fra ${describeImportSource(data)}.${cloudNote} Sjekk og juster tallene.`
+          : `Fant ingen tall automatisk.${cloudNote}`,
       );
     } catch (error) {
       setImportStatus(error instanceof Error ? error.message : "Noe gikk galt ved import.");
@@ -1257,18 +1321,29 @@ export default function App() {
 
     try {
       const data = await fetchFinnListing(url);
+      let cloudNote = "";
       if (target === "naa") {
-        setStatusQuo((current) => applyListingToStatusQuo(current, data));
+        const next = applyListingToStatusQuo(statusQuo, data);
+        const withProperty = await attachPropertyFromFinn(next, url, data, "statusQuo");
+        setStatusQuo(withProperty);
+        if (withProperty.propertyId) {
+          cloudNote = " Eiendom lagret i skyen.";
+        }
       } else {
-        setNyBolig((current) => applyListingToNyBolig(current, data));
+        const next = applyListingToNyBolig(nyBolig, data);
+        const withProperty = await attachPropertyFromFinn(next, url, data, "nyBolig");
+        setNyBolig(withProperty);
+        if (withProperty.propertyId) {
+          cloudNote = " Eiendom lagret i skyen.";
+        }
       }
       const tilstandMsg = data.tilstandsrapportFunnet
         ? " Tilstandsrapport: tiltak hentet."
         : "";
       setImportStatus(
         data.funnet
-          ? `${label}: importert fra ${describeImportSource(data)}.${tilstandMsg}`
-          : `${label}: fant ingen tall automatisk.${tilstandMsg}`,
+          ? `${label}: importert fra ${describeImportSource(data)}.${tilstandMsg}${cloudNote}`
+          : `${label}: fant ingen tall automatisk.${tilstandMsg}${cloudNote}`,
       );
     } catch (error) {
       setImportStatus(error instanceof Error ? error.message : "Noe gikk galt ved import.");
@@ -1296,20 +1371,30 @@ export default function App() {
 
       if (hasNaa) {
         const dataNaa = await fetchFinnListing(finnUrlNaa);
-        updatedStatusQuo = applyListingToStatusQuo(updatedStatusQuo, dataNaa);
+        updatedStatusQuo = await attachPropertyFromFinn(
+          applyListingToStatusQuo(updatedStatusQuo, dataNaa),
+          finnUrlNaa,
+          dataNaa,
+          "statusQuo",
+        );
         messages.push(
           dataNaa.funnet
-            ? `Nåværende bolig: ${describeImportSource(dataNaa)}${dataNaa.tilstandsrapportFunnet ? " + tilstandsrapport" : ""}`
+            ? `Nåværende bolig: ${describeImportSource(dataNaa)}${dataNaa.tilstandsrapportFunnet ? " + tilstandsrapport" : ""}${updatedStatusQuo.propertyId ? " · sky" : ""}`
             : "Nåværende bolig: ingen gjenkjente tall",
         );
       }
 
       if (hasNy) {
         const dataNy = await fetchFinnListing(finnUrlNy);
-        updatedNyBolig = applyListingToNyBolig(updatedNyBolig, dataNy);
+        updatedNyBolig = await attachPropertyFromFinn(
+          applyListingToNyBolig(updatedNyBolig, dataNy),
+          finnUrlNy,
+          dataNy,
+          "nyBolig",
+        );
         messages.push(
           dataNy.funnet
-            ? `Ny bolig: ${describeImportSource(dataNy)}${dataNy.tilstandsrapportFunnet ? " + tilstandsrapport" : ""}`
+            ? `Ny bolig: ${describeImportSource(dataNy)}${dataNy.tilstandsrapportFunnet ? " + tilstandsrapport" : ""}${updatedNyBolig.propertyId ? " · sky" : ""}`
             : "Ny bolig: ingen gjenkjente tall",
         );
       }
@@ -1363,6 +1448,22 @@ export default function App() {
     ],
     [statusQuo, statusQuoTotals, nyBolig, nyBoligTotals, nyBoligCostMonthly],
   );
+
+  const nyBoligLiquidity = useMemo(() => {
+    const operating = calculateOperatingCosts(nyBolig);
+    const monthlyOperating =
+      operating.monthlyTotal - (nyBolig.utleieAktivert ? nyBoligTotals.utleie.nettoInntektMnd : 0);
+
+    return buildLiquidityCashFlow({
+      years: nyBolig.likviditetAar ?? 10,
+      monthlyOperatingCost: Math.max(0, monthlyOperating),
+      monthlyLoanPayment: nyBoligTotals.monthlyLoanCost,
+      maintenancePlan: nyBolig.maintenancePlan ?? [],
+      inflasjonProsent: nyBolig.likviditetInflasjon ?? 2.5,
+      rentefradragSats: (nyBolig.skattesatsProsent ?? 22) / 100,
+      umiddelbarKapital: nyBolig.engangsTiltakTilstand ?? 0,
+    });
+  }, [nyBolig, nyBoligTotals]);
 
   return (
     <main className="page">
@@ -1748,6 +1849,8 @@ export default function App() {
                   home={statusQuo}
                   onUpdate={setStatusQuo}
                   onStatus={setImportStatus}
+                  authUser={authUser}
+                  homeContext="statusQuo"
                 />
                 </>
               }
@@ -1889,6 +1992,8 @@ export default function App() {
                   home={nyBolig}
                   onUpdate={setNyBolig}
                   onStatus={setImportStatus}
+                  authUser={authUser}
+                  homeContext="nyBolig"
                 />
                 </>
               }
@@ -2059,6 +2164,12 @@ export default function App() {
               items={flyttChartItems}
               formatValue={asCurrency}
             />
+            {(nyBolig.maintenancePlan?.length ?? 0) > 0 ? (
+              <CashFlowChart
+                scenario={nyBoligLiquidity}
+                title={`Likviditetsbudsjett – ${nyBolig.adresse?.trim() || nyBolig.name}`}
+              />
+            ) : null}
           </section>
         </>
       ) : (

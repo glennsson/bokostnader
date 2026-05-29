@@ -1,50 +1,74 @@
 # Sky-lagring med Supabase (gratis)
 
-Appen lagrer kalkulatordata i Supabase når du er innlogget. Uten innlogging brukes fortsatt **localStorage** i nettleseren.
+Appen lagrer kalkulatordata i Supabase når du er innlogget. Uten innlogging brukes **localStorage**.
 
 ## 1. Opprett prosjekt
 
-1. Gå til [supabase.com](https://supabase.com) og opprett et gratis prosjekt.
-2. Noter **Project URL** og **anon public** key (Settings → API).
+1. [supabase.com](https://supabase.com) → nytt prosjekt
+2. **Settings → API**: noter **Project URL**, **anon public**, **service_role** (kun server)
 
-## 2. Database
+## 2. Database (kjør i denne rekkefølgen)
 
-1. Supabase-dashboard → **SQL Editor** → New query.
-2. Lim inn innholdet fra `supabase/schema.sql` og kjør (**Run**).
-3. Kjør også `supabase/schema-snapshots.sql` (historikk / «Mine lagringer»-dashboard).
+SQL Editor → New query → lim inn og **Run** for hver fil:
 
-## 3. Innlogging (magic link)
+| Rekkefølge | Fil |
+|------------|-----|
+| 1 | `schema.sql` |
+| 2 | `schema-scenarios.sql` (properties, scenarios, maintenance_costs) |
+| 3 | `schema-tilstandsrapport-jobs.sql` (Storage + asynk parsing) |
+| 4 | `schema-snapshots.sql` (historikk / dashboard) |
 
-1. **Authentication** → **Providers** → **Email** → slå på.
-2. **Authentication** → **URL Configuration**:
-   - **Site URL**: produksjons-URL (f.eks. `https://bokostnader.vercel.app`)
-   - **Redirect URLs**: legg til
-     - `http://localhost:5173`
-     - `http://localhost:5174`
-     - produksjons-URL
+## 3. Realtime (tilstandsrapport)
 
-## 4. Miljøvariabler
+**Database** → **Replication** → slå på for tabellen `tilstandsrapport_jobs`.
 
-Opprett `.env` i prosjektmappen (kopier fra `.env.example`):
+Uten dette oppdateres ikke lasteindikatoren automatisk etter PDF-opplasting.
 
-```
+## 4. Innlogging (magic link)
+
+1. **Authentication** → **Providers** → **Email** → på
+2. **URL Configuration**:
+   - Site URL: produksjons-URL
+   - Redirect: `http://localhost:5173`, `http://localhost:5174`, produksjons-URL
+
+## 5. Miljøvariabler
+
+Kopier `.env.example` → `.env.local`:
+
+```env
+# Frontend
 VITE_SUPABASE_URL=https://xxxxx.supabase.co
-VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+VITE_SUPABASE_ANON_KEY=eyJ...
+
+# Kun server (asynk PDF-parsing)
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJ...service_role...
 ```
 
-Start dev-server på nytt etter endring: `npm run dev`.
+Start på nytt: `npm run dev`
 
-## 5. Vercel (produksjon)
+## 6. Vercel (produksjon)
 
-Vercel → prosjektet → **Settings** → **Environment Variables**:
+**Settings → Environment Variables** (alle miljøer):
 
-- `VITE_SUPABASE_URL`
-- `VITE_SUPABASE_ANON_KEY`
+| Variabel | Bruk |
+|----------|------|
+| `VITE_SUPABASE_URL` | Frontend |
+| `VITE_SUPABASE_ANON_KEY` | Frontend |
+| `SUPABASE_URL` | API `/api/tilstandsrapport/process-job` |
+| `SUPABASE_SERVICE_ROLE_KEY` | API (hemmelig) |
 
-Redeploy etter at variablene er lagt inn.
+Redeploy etter endring.
+
+## Asynk tilstandsrapport (flyt)
+
+1. Bruker laster opp PDF → **Storage** (`tilstandsrapport/{user_id}/…`)
+2. Rad i `tilstandsrapport_jobs` med `status = processing`
+3. Server parser PDF og setter `completed` + `result` (JSON)
+4. Frontend lytter via **Realtime** og fyller tabell + likviditetsbudsjett
 
 ## Sikkerhet
 
-- **anon**-nøkkelen er ment å ligge i frontend.
-- **Row Level Security** sørger for at hver bruker bare ser og endrer egne data.
-- Ikke legg **service_role**-nøkkel i appen eller på GitHub.
+- **anon** i frontend er OK med Row Level Security
+- **service_role** kun på server / Vercel – aldri i React-kode eller GitHub
+- `.env.local` er i `.gitignore`

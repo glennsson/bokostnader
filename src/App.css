@@ -1080,10 +1080,91 @@ p {
   margin-bottom: 0.65rem;
 }
 
-.tilstand-table td:nth-child(3) {
-  max-width: 280px;
-  font-size: 0.88rem;
-  color: var(--text-secondary);
+.tilstand-async-status {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0.65rem 0;
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  background: var(--accent-surface);
+  border: 1px solid var(--accent-border);
+  color: var(--auth-text);
+}
+
+.tilstand-async-status--failed {
+  background: var(--negative-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.tilstand-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--tab-active);
+  border-radius: 50%;
+  animation: tilstand-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes tilstand-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.cashflow-chart {
+  margin-top: 1.5rem;
+}
+
+.cashflow-columns {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 200px;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--border-strong);
+  overflow-x: auto;
+}
+
+.cashflow-col {
+  flex: 0 0 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.cashflow-track {
+  height: 140px;
+}
+
+.cashflow-bar {
+  width: 36px;
+  border-radius: 4px 4px 2px 2px;
+  transition: height 0.35s ease;
+}
+
+.cashflow-bar--negative {
+  background: linear-gradient(180deg, #f87171 0%, #dc2626 100%);
+}
+
+.cashflow-bar--positive {
+  background: linear-gradient(180deg, #34d399 0%, #059669 100%);
+}
+
+.cashflow-maint-tag {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.2;
+}
+
+.cashflow-foot {
+  margin-top: 0.75rem;
 }
 
 .data-table tfoot td {

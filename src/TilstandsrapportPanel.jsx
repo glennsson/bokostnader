@@ -1,4 +1,9 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  canUseAsyncTilstandsrapport,
+  subscribeTilstandsrapportJob,
+  uploadAndQueueTilstandsrapport,
+} from "./tilstandsrapportCloud";
 
 async function fetchTilstandsrapport(body) {
   let response;
@@ -18,8 +23,8 @@ async function fetchTilstandsrapport(body) {
   if (!contentType.includes("application/json")) {
     throw new Error(
       response.status === 404
-        ? "API mangler tilstandsrapport-rute – start «npm run dev» på nytt (port 8787 var sannsynligvis gammel)."
-        : `Serverfeil (HTTP ${response.status}). Start «npm run dev» på nytt.`,
+        ? "API mangler tilstandsrapport-rute – start «npm run dev» på nytt."
+        : `Serverfeil (HTTP ${response.status}).`,
     );
   }
 
@@ -49,13 +54,21 @@ function readFileAsBase64(file) {
 }
 
 export function applyTilstandsrapportToHome(home, parsed, { useNodvendigSum = true } = {}) {
+  const maintenancePlan = parsed.maintenancePlan ?? [];
+  const sumUmiddelbar =
+    parsed.sumUmiddelbar ??
+    maintenancePlan
+      .filter((item) => item.planlagtAar === 0 && (item.tg >= 3 || item.nodvendig))
+      .reduce((s, item) => s + item.belop, 0);
+
   const sum = useNodvendigSum
-    ? parsed.sumNodvendig || parsed.sumTotal
+    ? sumUmiddelbar || parsed.sumNodvendig || parsed.sumTotal
     : parsed.sumTotal;
 
   return {
     ...home,
     tilstandsTiltak: parsed.tiltak ?? [],
+    maintenancePlan,
     engangsTiltakTilstand: sum,
     tilstandsrapportUrl: parsed.dokumentUrl ?? home.tilstandsrapportUrl ?? "",
   };
@@ -66,14 +79,20 @@ export default function TilstandsrapportPanel({
   home,
   onUpdate,
   onStatus,
+  authUser,
+  homeContext = "nyBolig",
 }) {
   const fileInputRef = useRef(null);
   const [url, setUrl] = useState(home.tilstandsrapportUrl ?? "");
   const [pasteText, setPasteText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [asyncStatus, setAsyncStatus] = useState(null);
   const [filter, setFilter] = useState("nodvendig");
 
+  const useAsync = canUseAsyncTilstandsrapport() && Boolean(authUser);
+
   const tiltak = home.tilstandsTiltak ?? [];
+  const maintenancePlan = home.maintenancePlan ?? [];
   const visibleTiltak =
     filter === "alle"
       ? tiltak
@@ -82,26 +101,35 @@ export default function TilstandsrapportPanel({
   const applyParsed = (parsed, message) => {
     onUpdate(applyTilstandsrapportToHome(home, parsed));
     onStatus?.(message);
+    setAsyncStatus(null);
   };
 
-  const handleFetchUrl = async () => {
-    if (!url.trim()) {
-      onStatus?.("Lim inn lenke til tilstandsrapport (PDF eller nettside).");
+  useEffect(() => {
+    return () => setAsyncStatus(null);
+  }, []);
+
+  const handleAsyncJobUpdate = (row) => {
+    if (row.status === "processing") {
+      setAsyncStatus({ phase: "processing", message: "Parser rapport i skyen …" });
       return;
     }
 
-    setBusy(true);
-    onStatus?.("Henter rapport …");
-    try {
-      const parsed = await fetchTilstandsrapport({ url: url.trim() });
-      applyParsed(
-        parsed,
-        `Fant ${parsed.tiltak.length} tiltak – sum ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
-      );
-    } catch (error) {
-      onStatus?.(error instanceof Error ? error.message : "Parsing feilet.");
-    } finally {
+    if (row.status === "failed") {
       setBusy(false);
+      setAsyncStatus({
+        phase: "failed",
+        message: row.error_message ?? "Parsing feilet.",
+      });
+      onStatus?.(row.error_message ?? "Parsing feilet.");
+      return;
+    }
+
+    if (row.status === "completed" && row.result) {
+      setBusy(false);
+      applyParsed(
+        row.result,
+        `Fant ${row.result.tiltak?.length ?? 0} tiltak – koblet til likviditetsbudsjett.`,
+      );
     }
   };
 
@@ -117,21 +145,78 @@ export default function TilstandsrapportPanel({
     }
 
     setBusy(true);
-    onStatus?.("Leser PDF …");
+    onStatus?.("");
+
+    if (useAsync) {
+      setAsyncStatus({ phase: "upload", message: "Laster opp til skyen …" });
+      try {
+        const job = await uploadAndQueueTilstandsrapport(file, {
+          homeContext,
+          propertyId: home.propertyId ?? null,
+        });
+        setAsyncStatus({ phase: "processing", message: "Venter på parsing …" });
+
+        const unsubscribe = subscribeTilstandsrapportJob(job.id, {
+          onUpdate: (row) => {
+            handleAsyncJobUpdate(row);
+            if (row.status === "completed" || row.status === "failed") {
+              unsubscribe();
+            }
+          },
+          onError: () => {
+            onStatus?.("Realtime utilgjengelig – sjekk at tabellen er aktivert for Replication.");
+          },
+        });
+      } catch (error) {
+        setBusy(false);
+        setAsyncStatus({
+          phase: "failed",
+          message: error instanceof Error ? error.message : "Opplasting feilet.",
+        });
+        onStatus?.(error instanceof Error ? error.message : "Opplasting feilet.");
+      } finally {
+        if (fileInputRef.current) {
+          fileInputRef.current.value = "";
+        }
+      }
+      return;
+    }
+
+    setAsyncStatus({ phase: "processing", message: "Leser PDF lokalt …" });
     try {
       const pdfBase64 = await readFileAsBase64(file);
       const parsed = await fetchTilstandsrapport({ pdfBase64 });
       applyParsed(
         parsed,
-        `Fant ${parsed.tiltak.length} tiltak fra ${file.name} – sum ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
+        `Fant ${parsed.tiltak.length} tiltak – sum ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
       );
     } catch (error) {
       onStatus?.(error instanceof Error ? error.message : "Kunne ikke lese PDF.");
+      setAsyncStatus(null);
     } finally {
       setBusy(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
+    }
+  };
+
+  const handleFetchUrl = async () => {
+    if (!url.trim()) {
+      onStatus?.("Lim inn lenke til tilstandsrapport.");
+      return;
+    }
+
+    setBusy(true);
+    setAsyncStatus({ phase: "processing", message: "Henter rapport …" });
+    try {
+      const parsed = await fetchTilstandsrapport({ url: url.trim() });
+      applyParsed(parsed, `Fant ${parsed.tiltak.length} tiltak.`);
+    } catch (error) {
+      onStatus?.(error instanceof Error ? error.message : "Parsing feilet.");
+      setAsyncStatus(null);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -142,13 +227,9 @@ export default function TilstandsrapportPanel({
     }
 
     setBusy(true);
-    onStatus?.("");
     try {
       const parsed = await fetchTilstandsrapport({ text: pasteText });
-      applyParsed(
-        parsed,
-        `Fant ${parsed.tiltak.length} tiltak i limt tekst – sum ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
-      );
+      applyParsed(parsed, `Fant ${parsed.tiltak.length} tiltak i limt tekst.`);
     } catch (error) {
       onStatus?.(error instanceof Error ? error.message : "Parsing feilet.");
     } finally {
@@ -160,18 +241,33 @@ export default function TilstandsrapportPanel({
     onUpdate({
       ...home,
       tilstandsTiltak: [],
+      maintenancePlan: [],
       engangsTiltakTilstand: 0,
     });
     onStatus?.("Tiltak fra tilstandsrapport er fjernet.");
+    setAsyncStatus(null);
   };
 
   return (
     <section className="tilstand-panel">
       <h3>{title}</h3>
       <p className="hint">
-        Henter TG-tiltak og kostnadsestimat fra tilstandsrapport. Mange lenker krever innlogging –
-        da er det enklest å <strong>laste opp PDF</strong> direkte.
+        TG2/TG3 kobles til kostnadsdatabase og rulles inn i likviditetsbudsjettet.
+        {useAsync ? " PDF lastes opp asynkront med status i sanntid." : " Logg inn for asynk opplasting."}
       </p>
+
+      {asyncStatus ? (
+        <div
+          className={`tilstand-async-status tilstand-async-status--${asyncStatus.phase}`}
+          role="status"
+          aria-live="polite"
+        >
+          {asyncStatus.phase === "processing" || asyncStatus.phase === "upload" ? (
+            <span className="tilstand-spinner" aria-hidden="true" />
+          ) : null}
+          <span>{asyncStatus.message}</span>
+        </div>
+      ) : null}
 
       <div className="tilstand-upload">
         <input
@@ -187,13 +283,13 @@ export default function TilstandsrapportPanel({
           htmlFor={`tilstand-file-${title.replace(/\s/g, "-")}`}
           className="button button-primary tilstand-file-label"
         >
-          {busy ? "Leser …" : "Last opp PDF"}
+          {busy ? "Jobber …" : "Last opp PDF"}
         </label>
       </div>
 
       <div className="tilstand-controls">
         <label className="field">
-          <span>Eller lenke til rapport (PDF/HTML)</span>
+          <span>Eller lenke til rapport</span>
           <input
             type="url"
             value={url}
@@ -202,24 +298,19 @@ export default function TilstandsrapportPanel({
             disabled={busy}
           />
         </label>
-        <button
-          type="button"
-          className="button"
-          onClick={handleFetchUrl}
-          disabled={busy}
-        >
+        <button type="button" className="button" onClick={handleFetchUrl} disabled={busy}>
           Hent fra lenke
         </button>
       </div>
 
       <label className="field">
-        <span>Eller lim inn tekst (f.eks. kostnadstabell)</span>
+        <span>Eller lim inn tekst</span>
         <textarea
           className="tilstand-textarea"
           rows={4}
           value={pasteText}
           onChange={(event) => setPasteText(event.target.value)}
-          placeholder="Kopier avsnitt med TG2/TG3 og kostnadsestimat …"
+          placeholder="TG2/TG3 og kostnadsestimat …"
           disabled={busy}
         />
       </label>
@@ -231,12 +322,18 @@ export default function TilstandsrapportPanel({
         <>
           <div className="tilstand-summary">
             <p>
-              <strong>Sum nødvendig / TG3:</strong> {formatKr(home.engangsTiltakTilstand)}
+              <strong>Umiddelbart kapitalbehov (år 0):</strong>{" "}
+              {formatKr(home.engangsTiltakTilstand)}
             </p>
-            <p className="hint">
-              Summen er lagt inn som engangskostnad ved kjøp. Juster under flyttekostnader om
-              nødvendig.
-            </p>
+            {maintenancePlan.length > 0 ? (
+              <p className="hint">
+                Planlagte tiltak:{" "}
+                {maintenancePlan
+                  .filter((m) => m.planlagtAar > 0)
+                  .map((m) => `${m.omrade} om ${m.planlagtAar} år`)
+                  .join(" · ") || "ingen senere"}
+              </p>
+            ) : null}
           </div>
 
           <div className="tilstand-filter">
@@ -269,7 +366,8 @@ export default function TilstandsrapportPanel({
                 <tr>
                   <th scope="col">Område</th>
                   <th scope="col">TG</th>
-                  <th scope="col">Beskrivelse</th>
+                  <th scope="col">Planlagt</th>
+                  <th scope="col">Kilde</th>
                   <th scope="col" className="num">
                     Beløp
                   </th>
@@ -278,25 +376,16 @@ export default function TilstandsrapportPanel({
               <tbody>
                 {visibleTiltak.map((item, index) => (
                   <tr key={`${item.omrade}-${index}`}>
-                    <td>{item.omrade}</td>
+                    <td>{item.kategori ?? item.omrade}</td>
                     <td>{item.tg != null ? `TG${item.tg}` : "—"}</td>
-                    <td>{item.beskrivelse || "—"}</td>
+                    <td>
+                      {item.planlagtAar === 0 ? "Nå" : `Om ${item.planlagtAar} år`}
+                    </td>
+                    <td>{item.kildeBelop === "rapport" ? "Rapport" : "Database"}</td>
                     <td className="num">{formatKr(item.belop)}</td>
                   </tr>
                 ))}
               </tbody>
-              <tfoot>
-                <tr>
-                  <td colSpan={3}>
-                    <strong>Sum vist</strong>
-                  </td>
-                  <td className="num">
-                    <strong>
-                      {formatKr(visibleTiltak.reduce((s, i) => s + i.belop, 0))}
-                    </strong>
-                  </td>
-                </tr>
-              </tfoot>
             </table>
           </div>
         </>
