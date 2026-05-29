@@ -7,7 +7,7 @@ const app = express();
 const port = 8787;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "25mb" }));
 
 app.post("/api/finn/extract", async (req, res) => {
   const { url } = req.body ?? {};
@@ -26,10 +26,10 @@ app.post("/api/finn/extract", async (req, res) => {
 });
 
 app.post("/api/tilstandsrapport/parse", async (req, res) => {
-  const { url, text } = req.body ?? {};
+  const { url, text, pdfBase64 } = req.body ?? {};
 
   try {
-    const payload = await extractTilstandsrapport({ url, text });
+    const payload = await extractTilstandsrapport({ url, text, pdfBase64 });
     res.json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -41,6 +41,18 @@ app.post("/api/tilstandsrapport/parse", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`API kjører på http://localhost:${port}`);
+});
+
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(
+      `\nPort ${port} er allerede i bruk. Kjør «npm run dev» på nytt – porten frigjøres automatisk.\n` +
+        `Eller stopp manuelt: node scripts/free-port.mjs ${port}\n`,
+    );
+    process.exit(1);
+  }
+
+  throw error;
 });

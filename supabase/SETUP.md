@@ -11,6 +11,7 @@ Appen lagrer kalkulatordata i Supabase når du er innlogget. Uten innlogging bru
 
 1. Supabase-dashboard → **SQL Editor** → New query.
 2. Lim inn innholdet fra `supabase/schema.sql` og kjør (**Run**).
+3. Kjør også `supabase/schema-snapshots.sql` (historikk / «Mine lagringer»-dashboard).
 
 ## 3. Innlogging (magic link)
 

@@ -1,11 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import AuthPanel from "./AuthPanel";
+import Dashboard from "./Dashboard";
+import SavedSimulationsPanel from "./SavedSimulationsPanel";
 import TilstandsrapportPanel, { applyTilstandsrapportToHome } from "./TilstandsrapportPanel";
 import {
   deleteCloudState,
   getSessionUser,
+  formatSupabaseError,
   loadCloudState,
-  saveCloudState,
+  saveCloudSnapshot,
+  saveToSupabase,
   subscribeToAuth,
 } from "./cloudStorage";
 import { buildShareUrl, readShareFromUrl } from "./share";
@@ -17,6 +21,8 @@ import {
   loadSavedState,
   saveSavedState,
 } from "./storage";
+import { exportExcelReport } from "./exportExcel";
+import BarChart, { monthlyCostChartItem } from "./BarChart";
 import { applyThemeToDocument, getInitialTheme, THEME_STORAGE_KEY } from "./theme";
 import {
   estimateBoligverdi,
@@ -819,6 +825,8 @@ export default function App() {
   const [lastSavedAt, setLastSavedAt] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const [authUser, setAuthUser] = useState(null);
+  const [pageView, setPageView] = useState("calculator");
+  const [simulationsVersion, setSimulationsVersion] = useState(0);
   const [theme, setTheme] = useState(() => {
     const initial = getInitialTheme();
     applyThemeToDocument(initial);
@@ -875,32 +883,51 @@ export default function App() {
     [payloadDefaults],
   );
 
-  const persistPayload = useCallback(async (payload, statusMessage) => {
-    saveSavedState(payload);
-    setLastSavedAt(payload.savedAt);
+  const persistPayload = useCallback(
+    async (payload, statusMessage, { forceCloud = false } = {}) => {
+      saveSavedState(payload);
+      setLastSavedAt(payload.savedAt);
 
-    if (authUser && isCloudEnabled) {
+      if (!isCloudEnabled) {
+        if (statusMessage) {
+          setSaveStatus(statusMessage);
+        }
+        return;
+      }
+
       try {
-        await saveCloudState(payload);
+        const user = await getSessionUser();
+        if (!user) {
+          if (forceCloud || statusMessage) {
+            setSaveStatus(
+              statusMessage
+                ? `${statusMessage} Ikke lagret i sky – logg inn med e-post.`
+                : "Logg inn for å lagre i skyen.",
+            );
+          }
+          return;
+        }
+
+        await saveToSupabase(payload);
         setSaveStatus(
           statusMessage
-            ? `${statusMessage} Synkronisert med skyen.`
-            : "Synkronisert med skyen.",
+            ? `${statusMessage} Lagret i skyen.`
+            : "Autolagret i skyen.",
         );
-      } catch {
+      } catch (error) {
         setSaveStatus(
           statusMessage
-            ? `${statusMessage} Sky-synk feilet – lagret lokalt.`
-            : "Sky-synk feilet – lagret lokalt i nettleseren.",
+            ? `${statusMessage} ${formatSupabaseError(error)}`
+            : formatSupabaseError(error),
         );
       }
-      return;
-    }
+    },
+    [],
+  );
 
-    if (statusMessage) {
-      setSaveStatus(statusMessage);
-    }
-  }, [authUser]);
+  const bumpSimulationsList = useCallback(() => {
+    setSimulationsVersion((version) => version + 1);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -931,9 +958,9 @@ export default function App() {
               return;
             }
           }
-        } catch {
+        } catch (error) {
           if (!cancelled) {
-            setSaveStatus("Kunne ikke laste fra skyen – prøver lokal kopi.");
+            setSaveStatus(`Kunne ikke laste fra skyen: ${formatSupabaseError(error)}`);
           }
         }
       }
@@ -953,6 +980,7 @@ export default function App() {
       setAuthUser(user);
 
       if (event === "SIGNED_IN" && user) {
+        bumpSimulationsList();
         try {
           const cloud = await loadCloudState();
           if (cloud) {
@@ -963,17 +991,20 @@ export default function App() {
           const local = loadSavedState();
           if (local) {
             applySaved(local, null);
-            await saveCloudState(local);
+            await saveToSupabase(local);
             setSaveStatus("Innlogget – lokal kalkulator er lastet opp til skyen.");
           } else {
-            setSaveStatus("Innlogget – ingen lagret data ennå. Endringer lagres automatisk.");
+            setSaveStatus(
+              "Innlogget – ingen data i skyen ennå. Endre et tall eller trykk «Lagre nå» for å lagre.",
+            );
           }
-        } catch {
-          setSaveStatus("Innlogget, men kunne ikke synkronisere med skyen.");
+        } catch (error) {
+          setSaveStatus(`Innlogget, men sky-lagring feilet: ${formatSupabaseError(error)}`);
         }
       }
 
       if (event === "SIGNED_OUT") {
+        bumpSimulationsList();
         setSaveStatus("Utlogget. Data lagres lokalt i nettleseren.");
       }
     });
@@ -982,7 +1013,7 @@ export default function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, [applySaved]);
+  }, [applySaved, bumpSimulationsList]);
 
   const statusQuoTotals = useMemo(() => calculateStatusQuo(statusQuo), [statusQuo]);
   const nyBoligTotals = useMemo(
@@ -1037,6 +1068,30 @@ export default function App() {
     [forms],
   );
 
+  const handleExportExcel = () => {
+    exportExcelReport({
+      statusQuo,
+      statusQuoTotals,
+      nyBolig,
+      nyBoligTotals,
+      nyBoligCostMonthly,
+      nyBoligCostYearly,
+      moveDeltaMonthly,
+      moveDeltaYearly,
+      forms,
+      results,
+    });
+    setShareStatus("Excel-rapport lastet ned.");
+  };
+
+  const openSavedCalculation = useCallback(
+    (payload) => {
+      applySaved(payload, "Kalkulator lastet fra oversikten.");
+      setPageView("calculator");
+    },
+    [applySaved],
+  );
+
   const saveNow = () => {
     const payload = buildSavePayload({
       activeTab,
@@ -1050,7 +1105,28 @@ export default function App() {
       nyBoligTotals,
       formResults: results,
     });
-    void persistPayload(payload, "Kalkulator lagret med adresser og resultater.");
+
+    void (async () => {
+      await persistPayload(payload, "Kalkulator lagret med adresser og resultater.", {
+        forceCloud: true,
+      });
+      if (isCloudEnabled) {
+        try {
+          const user = await getSessionUser();
+          if (user) {
+            const snapshotId = await saveCloudSnapshot(payload);
+            if (snapshotId) {
+              setSaveStatus("Lagret i skyen og lagt til i «Mine lagringer».");
+            }
+          }
+        } catch (error) {
+          setSaveStatus(
+            `Lagret i skyen. Historikk-rad feilet: ${formatSupabaseError(error)}`,
+          );
+        }
+      }
+      bumpSimulationsList();
+    })();
   };
 
   const resetSaved = async () => {
@@ -1068,6 +1144,7 @@ export default function App() {
     }
 
     setSaveStatus("Lagret data er slettet fra nettleseren.");
+    bumpSimulationsList();
   };
 
   useEffect(() => {
@@ -1260,6 +1337,33 @@ export default function App() {
     (a, b) => a.totals.monthlyTotal - b.totals.monthlyTotal,
   );
 
+  const boformerChartItems = useMemo(
+    () =>
+      sortedResults.map((result) =>
+        monthlyCostChartItem(result, { highlight: baseline?.id === result.id }),
+      ),
+    [sortedResults, baseline?.id],
+  );
+
+  const flyttChartItems = useMemo(
+    () => [
+      monthlyCostChartItem({
+        id: "status-quo",
+        name: statusQuo.adresse?.trim() || statusQuo.name,
+        totals: statusQuoTotals,
+      }),
+      monthlyCostChartItem({
+        id: "ny-bolig",
+        name: nyBolig.adresse?.trim() || nyBolig.name,
+        totals: {
+          ...nyBoligTotals,
+          monthlyTotal: nyBoligCostMonthly,
+        },
+      }),
+    ],
+    [statusQuo, statusQuoTotals, nyBolig, nyBoligTotals, nyBoligCostMonthly],
+  );
+
   return (
     <main className="page">
       <header className="page-header">
@@ -1269,19 +1373,73 @@ export default function App() {
             Sammenlign nåværende bolig med en ny, eller flere boformer side om side.
           </p>
         </div>
-        <button
-          type="button"
-          className="button theme-toggle"
-          onClick={toggleTheme}
-          aria-pressed={theme === "dark"}
-          aria-label={theme === "dark" ? "Bytt til lyst tema" : "Bytt til mørkt tema"}
-        >
-          {theme === "dark" ? "Lys modus" : "Mørk modus"}
-        </button>
+        <div className="page-header-actions">
+          <button
+            type="button"
+            className="button header-excel-btn"
+            onClick={handleExportExcel}
+            title="Last ned Excel-rapport med kostnadssammenligning"
+          >
+            Last ned Excel-rapport
+          </button>
+          <button
+            type="button"
+            className="button theme-toggle"
+            onClick={toggleTheme}
+            aria-pressed={theme === "dark"}
+            aria-label={theme === "dark" ? "Bytt til lyst tema" : "Bytt til mørkt tema"}
+          >
+            {theme === "dark" ? "Lys modus" : "Mørk modus"}
+          </button>
+        </div>
       </header>
 
       <AuthPanel user={authUser} onAuthChange={setAuthUser} />
 
+      <nav className="app-nav" aria-label="Hovedvisning">
+        <button
+          type="button"
+          className={`tab ${pageView === "calculator" ? "tab-active" : ""}`}
+          onClick={() => setPageView("calculator")}
+        >
+          Kalkulator
+        </button>
+        <button
+          type="button"
+          className={`tab ${pageView === "dashboard" ? "tab-active" : ""}`}
+          onClick={() => setPageView("dashboard")}
+        >
+          Mine lagringer
+        </button>
+      </nav>
+
+      {pageView === "dashboard" ? (
+        <Dashboard
+          user={authUser}
+          onOpen={openSavedCalculation}
+          onBack={() => setPageView("calculator")}
+          refreshToken={simulationsVersion}
+        />
+      ) : (
+        <>
+      <SavedSimulationsPanel
+        user={authUser}
+        onOpen={openSavedCalculation}
+        variant="top"
+        refreshToken={simulationsVersion}
+        onViewAll={() => setPageView("dashboard")}
+      />
+
+      <div className="app-shell">
+        <SavedSimulationsPanel
+          user={authUser}
+          onOpen={openSavedCalculation}
+          variant="sidebar"
+          refreshToken={simulationsVersion}
+          onViewAll={() => setPageView("dashboard")}
+        />
+
+        <div className="app-main">
       <div className="share-row">
         <button type="button" className="button button-primary" onClick={copyShareLink}>
           Kopier delbar lenke
@@ -1895,6 +2053,12 @@ export default function App() {
                 </p>
               </article>
             </div>
+            <BarChart
+              title="Månedlig kostnad – søylediagram"
+              subtitle="Blå = lån, grønn = drift og felleskostnader"
+              items={flyttChartItems}
+              formatValue={asCurrency}
+            />
           </section>
         </>
       ) : (
@@ -2003,7 +2167,21 @@ export default function App() {
                 </tbody>
               </table>
             </div>
+            <BarChart
+              title="Månedlig kostnad per boform"
+              subtitle={
+                baseline
+                  ? `Markert søyle: ${baseline.adresse?.trim() || baseline.name} (referanse)`
+                  : "Sammenlign totalkostnad per måned"
+              }
+              items={boformerChartItems}
+              formatValue={asCurrency}
+            />
           </section>
+        </>
+      )}
+        </div>
+      </div>
         </>
       )}
     </main>

@@ -15,10 +15,10 @@ export default async function handler(request, response) {
     return;
   }
 
-  const { url, text } = request.body ?? {};
+  const { url, text, pdfBase64 } = request.body ?? {};
 
   try {
-    const payload = await extractTilstandsrapport({ url, text });
+    const payload = await extractTilstandsrapport({ url, text, pdfBase64 });
     response.status(200).json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

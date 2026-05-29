@@ -1,16 +1,51 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 
-async function fetchTilstandsrapport({ url, text }) {
-  const response = await fetch("/api/tilstandsrapport/parse", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: url?.trim() || undefined, text: text?.trim() || undefined }),
-  });
+async function fetchTilstandsrapport(body) {
+  let response;
+  try {
+    response = await fetch("/api/tilstandsrapport/parse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error(
+      "Kunne ikke nå API-serveren. Stopp andre «npm run dev»-vinduer og start på nytt.",
+    );
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    throw new Error(
+      response.status === 404
+        ? "API mangler tilstandsrapport-rute – start «npm run dev» på nytt (port 8787 var sannsynligvis gammel)."
+        : `Serverfeil (HTTP ${response.status}). Start «npm run dev» på nytt.`,
+    );
+  }
+
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(data?.error ?? "Kunne ikke lese tilstandsrapport.");
+    const detail = data?.details ? ` (${data.details})` : "";
+    throw new Error((data?.error ?? "Kunne ikke lese tilstandsrapport.") + detail);
   }
   return data;
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("Kunne ikke lese filen."));
+        return;
+      }
+      const base64 = result.includes(",") ? result.split(",")[1] : result;
+      resolve(base64);
+    };
+    reader.onerror = () => reject(new Error("Kunne ikke lese filen."));
+    reader.readAsDataURL(file);
+  });
 }
 
 export function applyTilstandsrapportToHome(home, parsed, { useNodvendigSum = true } = {}) {
@@ -32,6 +67,7 @@ export default function TilstandsrapportPanel({
   onUpdate,
   onStatus,
 }) {
+  const fileInputRef = useRef(null);
   const [url, setUrl] = useState(home.tilstandsrapportUrl ?? "");
   const [pasteText, setPasteText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -55,17 +91,47 @@ export default function TilstandsrapportPanel({
     }
 
     setBusy(true);
-    onStatus?.("");
+    onStatus?.("Henter rapport …");
     try {
-      const parsed = await fetchTilstandsrapport({ url });
+      const parsed = await fetchTilstandsrapport({ url: url.trim() });
       applyParsed(
         parsed,
-        `Fant ${parsed.tiltak.length} tiltak – sum nødvendig ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
+        `Fant ${parsed.tiltak.length} tiltak – sum ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
       );
     } catch (error) {
       onStatus?.(error instanceof Error ? error.message : "Parsing feilet.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleFileUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    if (!file.name.toLowerCase().endsWith(".pdf") && file.type !== "application/pdf") {
+      onStatus?.("Velg en PDF-fil (.pdf).");
+      return;
+    }
+
+    setBusy(true);
+    onStatus?.("Leser PDF …");
+    try {
+      const pdfBase64 = await readFileAsBase64(file);
+      const parsed = await fetchTilstandsrapport({ pdfBase64 });
+      applyParsed(
+        parsed,
+        `Fant ${parsed.tiltak.length} tiltak fra ${file.name} – sum ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
+      );
+    } catch (error) {
+      onStatus?.(error instanceof Error ? error.message : "Kunne ikke lese PDF.");
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
     }
   };
 
@@ -81,7 +147,7 @@ export default function TilstandsrapportPanel({
       const parsed = await fetchTilstandsrapport({ text: pasteText });
       applyParsed(
         parsed,
-        `Fant ${parsed.tiltak.length} tiltak i limt tekst – sum nødvendig ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
+        `Fant ${parsed.tiltak.length} tiltak i limt tekst – sum ${formatKr(parsed.sumNodvendig || parsed.sumTotal)}.`,
       );
     } catch (error) {
       onStatus?.(error instanceof Error ? error.message : "Parsing feilet.");
@@ -103,33 +169,58 @@ export default function TilstandsrapportPanel({
     <section className="tilstand-panel">
       <h3>{title}</h3>
       <p className="hint">
-        Henter kostnadsestimat for tiltak som bør eller må gjennomføres (TG2/TG3) per område i
-        boligen, fra tilstandsrapport eller boligsalgsrapport.
+        Henter TG-tiltak og kostnadsestimat fra tilstandsrapport. Mange lenker krever innlogging –
+        da er det enklest å <strong>laste opp PDF</strong> direkte.
       </p>
+
+      <div className="tilstand-upload">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,application/pdf"
+          onChange={handleFileUpload}
+          disabled={busy}
+          className="tilstand-file-input"
+          id={`tilstand-file-${title.replace(/\s/g, "-")}`}
+        />
+        <label
+          htmlFor={`tilstand-file-${title.replace(/\s/g, "-")}`}
+          className="button button-primary tilstand-file-label"
+        >
+          {busy ? "Leser …" : "Last opp PDF"}
+        </label>
+      </div>
 
       <div className="tilstand-controls">
         <label className="field">
-          <span>Lenke til tilstandsrapport (PDF/HTML)</span>
+          <span>Eller lenke til rapport (PDF/HTML)</span>
           <input
             type="url"
             value={url}
             onChange={(event) => setUrl(event.target.value)}
             placeholder="https://…/tilstandsrapport.pdf"
+            disabled={busy}
           />
         </label>
-        <button type="button" className="button button-primary" onClick={handleFetchUrl} disabled={busy}>
-          {busy ? "Henter …" : "Hent tiltak"}
+        <button
+          type="button"
+          className="button"
+          onClick={handleFetchUrl}
+          disabled={busy}
+        >
+          Hent fra lenke
         </button>
       </div>
 
       <label className="field">
-        <span>Eller lim inn tekst fra rapporten</span>
+        <span>Eller lim inn tekst (f.eks. kostnadstabell)</span>
         <textarea
           className="tilstand-textarea"
           rows={4}
           value={pasteText}
           onChange={(event) => setPasteText(event.target.value)}
-          placeholder="Lim inn avsnitt med TG-grader og kostnadsestimat …"
+          placeholder="Kopier avsnitt med TG2/TG3 og kostnadsestimat …"
+          disabled={busy}
         />
       </label>
       <button type="button" className="button" onClick={handleParsePaste} disabled={busy}>
@@ -143,8 +234,8 @@ export default function TilstandsrapportPanel({
               <strong>Sum nødvendig / TG3:</strong> {formatKr(home.engangsTiltakTilstand)}
             </p>
             <p className="hint">
-              Summen er lagt inn som engangskostnad (tiltak etter teknisk tilstand). Juster
-              under flyttekostnader / vedlikehold om du vil fordele annerledes.
+              Summen er lagt inn som engangskostnad ved kjøp. Juster under flyttekostnader om
+              nødvendig.
             </p>
           </div>
 
