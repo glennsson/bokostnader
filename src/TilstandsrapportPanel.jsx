@@ -56,20 +56,23 @@ function readFileAsBase64(file) {
 export function applyTilstandsrapportToHome(home, parsed, { useNodvendigSum = true } = {}) {
   const maintenancePlan = parsed.maintenancePlan ?? [];
   const sumUmiddelbar =
-    parsed.sumUmiddelbar ??
+    Number(parsed.sumUmiddelbar) ||
     maintenancePlan
       .filter((item) => item.planlagtAar === 0 && (item.tg >= 3 || item.nodvendig))
-      .reduce((s, item) => s + item.belop, 0);
+      .reduce((s, item) => s + (Number(item.belop) || 0), 0);
+
+  const sumNodvendig = Number(parsed.sumNodvendig) || 0;
+  const sumTotal = Number(parsed.sumTotal) || 0;
 
   const sum = useNodvendigSum
-    ? sumUmiddelbar || parsed.sumNodvendig || parsed.sumTotal
-    : parsed.sumTotal;
+    ? sumUmiddelbar || sumNodvendig || sumTotal
+    : sumTotal;
 
   return {
     ...home,
     tilstandsTiltak: parsed.tiltak ?? [],
     maintenancePlan,
-    engangsTiltakTilstand: sum,
+    engangsTiltakTilstand: Number.isFinite(sum) ? Math.round(sum) : 0,
     tilstandsrapportUrl: parsed.dokumentUrl ?? home.tilstandsrapportUrl ?? "",
   };
 }

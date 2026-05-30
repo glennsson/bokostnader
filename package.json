@@ -9,6 +9,7 @@
     "dev:server": "node scripts/free-port.mjs 8787 && node server.js",
     "free-port": "node scripts/free-port.mjs 8787",
     "build": "vite build",
+    "test:parser": "node scripts/test-parser.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
