@@ -198,7 +198,7 @@ const defaultStatusQuo = {
   name: "Nåværende bolig",
   adresse: "",
   overtakelsesdato: "2021-05-28",
-  kjopspris: 4200000,
+  prisantydning: 4200000,
   egenkapitalVedKjop: 840000,
   verdiIDag: 5200000,
   verdiModus: "manuell",
@@ -328,7 +328,11 @@ function applyListingImport(current, data) {
 
 function applyListingToStatusQuo(statusQuo, data) {
   const next = applyListingCosts({ ...statusQuo }, data);
-  if (data.boligpris != null) next.verdiIDag = data.boligpris;
+  if (data.boligpris != null) {
+    next.prisantydning = data.boligpris;
+    next.verdiIDag = data.boligpris;
+  }
+  if (data.boarealKvm != null) next.boarealKvm = data.boarealKvm;
   if (data.tilstandsrapport?.found) {
     return applyTilstandsrapportToHome(next, data.tilstandsrapport);
   }
@@ -388,16 +392,16 @@ function calculateStatusQuo(statusQuo) {
   const aarBodd = yearsSinceOvertakelse(statusQuo.overtakelsesdato);
 
   const estimertVerdi = estimateBoligverdi({
-    kjopspris: statusQuo.kjopspris,
+    kjopspris: statusQuo.prisantydning,
     aarBodd,
     verdistigningAarlig: statusQuo.verdistigningAarlig,
     boarealKvm: statusQuo.boarealKvm,
   });
   const verdiModus = statusQuo.verdiModus === "estimert" ? "estimert" : "manuell";
   const effectiveVerdi = verdiModus === "estimert" ? estimertVerdi : statusQuo.verdiIDag;
-  const verdistigning = calculateVerdistigning(statusQuo.kjopspris, effectiveVerdi);
+  const verdistigning = calculateVerdistigning(statusQuo.prisantydning, effectiveVerdi);
 
-  const laanVedKjop = Math.max(0, statusQuo.kjopspris - statusQuo.egenkapitalVedKjop);
+  const laanVedKjop = Math.max(0, statusQuo.prisantydning - statusQuo.egenkapitalVedKjop);
   const beregnetRestgjeld = remainingLoanBalance(
     laanVedKjop,
     statusQuo.rente,
@@ -416,8 +420,8 @@ function calculateStatusQuo(statusQuo) {
   const monthlyTotal = monthlyLoanCost + operating.monthlyTotal;
   const egenkapital = effectiveVerdi - restgjeld;
   const nettoFraSalg = effectiveVerdi - restgjeld - statusQuo.salgskostnader;
-  const dokumentavgift = calculateDokumentavgift(statusQuo, statusQuo.kjopspris);
-  const totalKjopskostnad = statusQuo.kjopspris + dokumentavgift;
+  const dokumentavgift = calculateDokumentavgift(statusQuo, statusQuo.prisantydning);
+  const totalKjopskostnad = statusQuo.prisantydning + dokumentavgift;
 
   return {
     laanVedKjop,
@@ -811,7 +815,7 @@ function FormCard({ item, onUpdate, onRemove, totals, canRemove }) {
 
 const statusQuoFields = [
   { key: "overtakelsesdato", label: "Overtakelsesdato", type: "date" },
-  { key: "kjopspris", label: "Kjøpspris (kr)" },
+  { key: "prisantydning", label: "Prisantydning/kjøpesum (kr)" },
   { key: "egenkapitalVedKjop", label: "Egenkapital ved kjøp (kr)" },
   { key: "boarealKvm", label: "Boareal (kvm)", step: 1 },
   { key: "restgjeld", label: "Restgjeld i dag (kr, 0 = auto)" },
@@ -1470,7 +1474,7 @@ export default function App() {
       <header className="page-header">
         <div className="page-header-text">
           <h1>Kalkulator for boligkostnader</h1>
-          <p>
+          <p className="hint">
             Sammenlign nåværende bolig med en ny, eller flere boformer side om side.
           </p>
         </div>
@@ -1560,51 +1564,6 @@ export default function App() {
         ) : null}
       </div>
 
-      <section className="saved-overview">
-        <h2>Boliger og lagrede resultater</h2>
-        <div className="saved-grid">
-          <article className="saved-card">
-            <h3>{statusQuo.adresse?.trim() || statusQuo.name}</h3>
-            <p className="saved-label">Nåværende bolig</p>
-            <p>
-              Månedlig: <strong>{asCurrency(statusQuoTotals.monthlyTotal)}</strong>
-            </p>
-            <p>
-              Årlig: <strong>{asCurrency(statusQuoTotals.yearlyTotal)}</strong>
-            </p>
-            <p>
-              Netto fra salg: <strong>{asCurrency(statusQuoTotals.nettoFraSalg)}</strong>
-            </p>
-          </article>
-          <article className="saved-card">
-            <h3>{nyBolig.adresse?.trim() || nyBolig.name}</h3>
-            <p className="saved-label">Ny bolig</p>
-            <p>
-              Månedlig: <strong>{asCurrency(nyBoligCostMonthly)}</strong>
-              {nyBolig.utleieAktivert ? <span className="hint"> (etter utleie)</span> : null}
-            </p>
-            <p>
-              Årlig: <strong>{asCurrency(nyBoligCostYearly)}</strong>
-            </p>
-            <p>
-              Lånebehov: <strong>{asCurrency(nyBoligTotals.laan)}</strong>
-            </p>
-          </article>
-          {results.map((result) => (
-            <article key={result.id} className="saved-card">
-              <h3>{result.adresse?.trim() || result.name}</h3>
-              <p className="saved-label">{result.name}</p>
-              <p>
-                Månedlig: <strong>{asCurrency(result.totals.monthlyTotal)}</strong>
-              </p>
-              <p>
-                Årlig: <strong>{asCurrency(result.totals.yearlyTotal)}</strong>
-              </p>
-            </article>
-          ))}
-        </div>
-      </section>
-
       <nav className="tabs" aria-label="Visning">
         <button
           type="button"
@@ -1622,7 +1581,7 @@ export default function App() {
         </button>
       </nav>
 
-      <section className="importer">
+      <section className="importer" id="importer-finn">
         <h2>Importer fra FINN</h2>
         <p>
           {activeTab === "flytt"
@@ -1716,6 +1675,51 @@ export default function App() {
         {importStatus ? <p className="import-status">{importStatus}</p> : null}
       </section>
 
+      <section className="saved-overview">
+        <h2>Boliger og lagrede resultater</h2>
+        <div className="saved-grid">
+          <article className="saved-card">
+            <h3>{statusQuo.adresse?.trim() || statusQuo.name}</h3>
+            <p className="saved-label">Nåværende bolig</p>
+            <p>
+              Månedlig: <strong>{asCurrency(statusQuoTotals.monthlyTotal)}</strong>
+            </p>
+            <p>
+              Årlig: <strong>{asCurrency(statusQuoTotals.yearlyTotal)}</strong>
+            </p>
+            <p>
+              Netto fra salg: <strong>{asCurrency(statusQuoTotals.nettoFraSalg)}</strong>
+            </p>
+          </article>
+          <article className="saved-card">
+            <h3>{nyBolig.adresse?.trim() || nyBolig.name}</h3>
+            <p className="saved-label">Ny bolig</p>
+            <p>
+              Månedlig: <strong>{asCurrency(nyBoligCostMonthly)}</strong>
+              {nyBolig.utleieAktivert ? <span className="hint"> (etter utleie)</span> : null}
+            </p>
+            <p>
+              Årlig: <strong>{asCurrency(nyBoligCostYearly)}</strong>
+            </p>
+            <p>
+              Lånebehov: <strong>{asCurrency(nyBoligTotals.laan)}</strong>
+            </p>
+          </article>
+          {results.map((result) => (
+            <article key={result.id} className="saved-card">
+              <h3>{result.adresse?.trim() || result.name}</h3>
+              <p className="saved-label">{result.name}</p>
+              <p>
+                Månedlig: <strong>{asCurrency(result.totals.monthlyTotal)}</strong>
+              </p>
+              <p>
+                Årlig: <strong>{asCurrency(result.totals.yearlyTotal)}</strong>
+              </p>
+            </article>
+          ))}
+        </div>
+      </section>
+
       {activeTab === "flytt" ? (
         <>
           <section className="cards move-cards">
@@ -1783,7 +1787,7 @@ export default function App() {
                         step={0.1}
                       />
                       <p className="hint">
-                        Egenkapital og netto fra salg beregnes fra estimatet (kjøpspris, tid,
+                        Egenkapital og netto fra salg beregnes fra estimatet (prisantydning/kjøpesum, tid,
                         prisstigning og kvm).
                       </p>
                     </>
@@ -1840,7 +1844,7 @@ export default function App() {
                     </div>
                   ) : null}
                   <p className="hint">
-                    Beregnes av kjøpspris ({asCurrency(statusQuo.kjopspris)}). Gjelder
+                    Beregnes av prisantydning/kjøpesum ({asCurrency(statusQuo.prisantydning)}). Gjelder
                     engangskostnad da du kjøpte nåværende bolig.
                   </p>
                 </div>

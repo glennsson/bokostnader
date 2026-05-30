@@ -10,11 +10,19 @@ export function formatSupabaseError(error) {
   const base = parts.join(" – ") || "Ukjent feil mot Supabase.";
 
   if (error.code === "42P01" || error.code === "PGRST205") {
-    return `${base} Kjør SQL fra supabase/schema.sql i Supabase (tabell kalkulator_data mangler).`;
+    return `${base} Kjør supabase/01-kalkulator-grunnlag.sql i Supabase (tabell kalkulator_data mangler).`;
   }
 
   if (error.code === "42501") {
     return `${base} Sjekk Row Level Security-policies i Supabase.`;
+  }
+
+  if (/bucket not found/i.test(base)) {
+    return `${base} Kjør supabase/02-tilstandsrapport-pdf-bucket.sql i Supabase SQL Editor (Storage-bucket «tilstandsrapport» mangler).`;
+  }
+
+  if (/invalid key/i.test(base)) {
+    return `${base} Filnavnet inneholder tegn Storage ikke støtter (æ, ø, å, mellomrom). Prøv på nytt – appen konverterer nå til ASCII automatisk.`;
   }
 
   return base;

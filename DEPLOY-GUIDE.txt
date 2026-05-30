@@ -41,7 +41,7 @@ Steg-for-steg: se filen  supabase/SETUP.md  i prosjektmappen.
 
 Kort versjon:
   1. Opprett gratis prosjekt på https://supabase.com
-  2. Kjør SQL fra  supabase/schema.sql  (SQL Editor)
+  2. Kjør SQL fra  supabase/01-kalkulator-grunnlag.sql  m.fl. (SQL Editor, se SETUP.md)
   3. Slå på e-post-innlogging, legg inn redirect-URL (localhost + Vercel)
   4. Kopier .env.example til .env og fyll inn URL + anon key
   5. Lokalt: npm run dev på nytt

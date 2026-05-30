@@ -1,5 +1,8 @@
--- Kjør ETTER schema.sql OG schema-scenarios.sql (property_id FK)
--- Asynk parsing av tilstandsrapport + Storage
+-- Navn i Supabase SQL Editor: 02 · Tilstandsrapport PDF-bucket
+-- Fil: supabase/02-tilstandsrapport-pdf-bucket.sql
+-- Kjør ETTER 01-kalkulator-grunnlag.sql
+-- Storage-bucket + jobb-tabell for asynk PDF-parsing.
+-- Trygg å kjøre flere ganger (idempotent).
 
 -- ========== Storage-bucket ==========
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
@@ -13,6 +16,7 @@ values (
 on conflict (id) do nothing;
 
 -- Brukere laster opp til mappe {user_id}/...
+drop policy if exists "Egen mappe: les PDF" on storage.objects;
 create policy "Egen mappe: les PDF"
   on storage.objects for select
   using (
@@ -20,6 +24,7 @@ create policy "Egen mappe: les PDF"
     and auth.uid()::text = split_part(name, '/', 1)
   );
 
+drop policy if exists "Egen mappe: last opp PDF" on storage.objects;
 create policy "Egen mappe: last opp PDF"
   on storage.objects for insert
   with check (
@@ -27,6 +32,7 @@ create policy "Egen mappe: last opp PDF"
     and auth.uid()::text = split_part(name, '/', 1)
   );
 
+drop policy if exists "Egen mappe: slett PDF" on storage.objects;
 create policy "Egen mappe: slett PDF"
   on storage.objects for delete
   using (
@@ -42,7 +48,7 @@ create table if not exists public.tilstandsrapport_jobs (
   file_name text,
   status text not null default 'processing'
     check (status in ('processing', 'completed', 'failed')),
-  property_id uuid references public.properties (id) on delete set null,
+  property_id uuid,
   home_context text,
   result jsonb,
   error_message text,
@@ -55,10 +61,12 @@ create index if not exists tilstandsrapport_jobs_user_idx
 
 alter table public.tilstandsrapport_jobs enable row level security;
 
+drop policy if exists "Les egne rapport-jobber" on public.tilstandsrapport_jobs;
 create policy "Les egne rapport-jobber"
   on public.tilstandsrapport_jobs for select
   using (auth.uid() = user_id);
 
+drop policy if exists "Opprett egne rapport-jobber" on public.tilstandsrapport_jobs;
 create policy "Opprett egne rapport-jobber"
   on public.tilstandsrapport_jobs for insert
   with check (auth.uid() = user_id);

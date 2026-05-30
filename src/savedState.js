@@ -11,6 +11,10 @@ export function extractStateFromPayload(saved, { defaultStatusQuo, defaultNyBoli
 
   if (saved.statusQuo) {
     const sq = { ...defaultStatusQuo, ...saved.statusQuo };
+    if (sq.kjopspris != null && sq.prisantydning == null) {
+      sq.prisantydning = sq.kjopspris;
+    }
+    delete sq.kjopspris;
     if (sq.aarBodd != null && !sq.overtakelsesdato) {
       const approx = new Date();
       approx.setFullYear(approx.getFullYear() - Math.round(sq.aarBodd));

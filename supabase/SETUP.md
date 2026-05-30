@@ -11,12 +11,15 @@ Appen lagrer kalkulatordata i Supabase når du er innlogget. Uten innlogging bru
 
 SQL Editor → New query → lim inn og **Run** for hver fil:
 
-| Rekkefølge | Fil |
-|------------|-----|
-| 1 | `schema.sql` |
-| 2 | `schema-scenarios.sql` (properties, scenarios, maintenance_costs) |
-| 3 | `schema-tilstandsrapport-jobs.sql` (Storage + asynk parsing) |
-| 4 | `schema-snapshots.sql` (historikk / dashboard) |
+| Rekkefølge | Fil | Navn i SQL Editor |
+|------------|-----|-------------------|
+| 1 | `01-kalkulator-grunnlag.sql` | **01 · Kalkulator grunnlag** |
+| 2 | `02-tilstandsrapport-pdf-bucket.sql` | **02 · Tilstandsrapport PDF-bucket** |
+| 3 | `03-boliger-scenarioer-vedlikehold.sql` | **03 · Boliger, scenarioer og vedlikehold** |
+| 4 | `04-lagret-historikk.sql` | **04 · Lagret historikk (dashboard)** |
+
+> Feil «policy … already exists» betyr at filen allerede er kjørt – hopp over den og gå videre.  
+> Alle schema-filer kan kjøres på nytt uten feil (idempotente).
 
 ## 3. Realtime (tilstandsrapport)
 

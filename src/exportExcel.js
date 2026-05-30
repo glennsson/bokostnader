@@ -114,7 +114,7 @@ function buildCapitalSheet({
     [],
     ["Nåværende bolig (salg)"],
     ["Post", "Beløp (kr)"],
-    ["Kjøpspris", roundKr(statusQuo.kjopspris)],
+    ["Prisantydning/kjøpesum", roundKr(statusQuo.prisantydning)],
     [
       statusQuoTotals.verdiModus === "estimert"
         ? "Verdi i dag (estimert)"
